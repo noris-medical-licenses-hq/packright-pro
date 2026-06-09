@@ -25,6 +25,7 @@ function CartonDetail() {
     );
   }
 
+  const cartonNonNull = carton;
   const items = getCartonItems(allocations, lines, cartonId);
   const totalQty = getCartonTotalQty(allocations, cartonId);
 
@@ -35,8 +36,8 @@ function CartonDetail() {
         <div className="flex items-center gap-1 mt-1">
           <input
             type="number" step={key === "weight" ? 0.01 : 1} min={0}
-            value={(carton[key] as number | undefined) ?? ""}
-            onChange={(e) => updateCarton(carton!.id, { [key]: Number(e.target.value) || undefined })}
+            value={(cartonNonNull[key] as number | undefined) ?? ""}
+            onChange={(e) => updateCarton(cartonNonNull.id, { [key]: Number(e.target.value) || undefined })}
             className="flex-1 bg-card ring-1 ring-border rounded-md px-3 py-2 text-base tabular-nums outline-none focus:ring-brand-accent"
           />
           <span className="text-xs text-muted-foreground">{suffix}</span>
