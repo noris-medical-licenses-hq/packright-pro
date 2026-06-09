@@ -29,7 +29,7 @@ export const Route = createFileRoute("/packing")({
 });
 
 type Draft = { id: string; cartonId: string | "__new__"; quantity: number; newNumber?: string };
-type SortMode = "status" | "wo" | "sku";
+type SortMode = "sku" | "status" | "wo";
 
 function PackingWorkspace() {
   const {
@@ -42,8 +42,8 @@ function PackingWorkspace() {
   const [skuSearch, setSkuSearch] = useState("");
   const [descSearch, setDescSearch] = useState("");
 
-  // ── view controls
-  const [sortMode, setSortMode] = useState<SortMode>("status");
+  // ── view controls — SKU sort is the default (predictable, operator-friendly)
+  const [sortMode, setSortMode] = useState<SortMode>("sku");
   const [groupByWo, setGroupByWo] = useState(false);
   const [showCartons, setShowCartons] = useState(false);
 
@@ -89,25 +89,28 @@ function PackingWorkspace() {
     });
   }, [lines, woSearch, skuSearch, descSearch]);
 
-  // ── sort
+  // ── sort — always use SKU as a stable secondary key
   const sortedLines = useMemo(() => {
     const arr = [...filteredLines];
-    if (sortMode === "status") {
-      const order: Record<string, number> = { none: 0, partial: 1, full: 2 };
-      arr.sort(
-        (a, b) =>
-          order[getLineStatus(a, packedByLine.get(a.id) ?? 0)] -
-          order[getLineStatus(b, packedByLine.get(b.id) ?? 0)],
-      );
-    } else if (sortMode === "wo") {
-      arr.sort((a, b) => a.workOrder.localeCompare(b.workOrder, "he"));
-    } else {
+    if (sortMode === "sku") {
       arr.sort((a, b) => a.sku.localeCompare(b.sku));
+    } else if (sortMode === "status") {
+      const order: Record<string, number> = { none: 0, partial: 1, full: 2 };
+      arr.sort((a, b) => {
+        const diff = order[getLineStatus(a, packedByLine.get(a.id) ?? 0)] - order[getLineStatus(b, packedByLine.get(b.id) ?? 0)];
+        return diff !== 0 ? diff : a.sku.localeCompare(b.sku);
+      });
+    } else {
+      // "wo" — sort by WO then SKU
+      arr.sort((a, b) => {
+        const diff = a.workOrder.localeCompare(b.workOrder, "he");
+        return diff !== 0 ? diff : a.sku.localeCompare(b.sku);
+      });
     }
     return arr;
   }, [filteredLines, sortMode, packedByLine]);
 
-  // ── WO groups (only when groupByWo is on)
+  // ── WO groups: alphabetical WO order, SKU order within each group
   const woGroups = useMemo(() => {
     if (!groupByWo) return null;
     const map = new Map<string, ShipmentLine[]>();
@@ -116,40 +119,61 @@ function PackingWorkspace() {
       arr.push(l);
       map.set(l.workOrder, arr);
     }
-    // Sort groups: most incomplete first
-    return Array.from(map.entries()).sort(([, a], [, b]) => {
-      const pctA = a.reduce((s, l) => s + (packedByLine.get(l.id) ?? 0), 0) / a.reduce((s, l) => s + l.quantity, 0);
-      const pctB = b.reduce((s, l) => s + (packedByLine.get(l.id) ?? 0), 0) / b.reduce((s, l) => s + l.quantity, 0);
-      return (isNaN(pctA) ? 0 : pctA) - (isNaN(pctB) ? 0 : pctB);
-    });
-  }, [groupByWo, sortedLines, packedByLine]);
+    // Sort WOs alphabetically; lines within each group sorted by SKU (ascending)
+    return Array.from(map.entries())
+      .sort(([woA], [woB]) => woA.localeCompare(woB, "he"))
+      .map(([wo, ls]) => [wo, ls.slice().sort((a, b) => a.sku.localeCompare(b.sku))] as [string, ShipmentLine[]]);
+  }, [groupByWo, sortedLines]);
 
-  // ── overall progress
+  // ── overall progress (single-pass for performance)
   const progress = useMemo(() => {
-    const totalLines = lines.length;
-    const packedLines = lines.filter((l) => getLineStatus(l, packedByLine.get(l.id) ?? 0) === "full").length;
-    const totalQty = lines.reduce((s, l) => s + l.quantity, 0);
-    const packedQty = Array.from(packedByLine.values()).reduce((s, v) => s + v, 0);
-    return {
-      totalLines, packedLines,
-      remainingLines: totalLines - packedLines,
-      totalQty, packedQty,
-      remainingQty: totalQty - packedQty,
-      pct: totalQty ? Math.round((packedQty / totalQty) * 100) : 0,
-    };
-  }, [lines, packedByLine]);
+    const woMap = new Map<string, { total: number; full: number }>();
+    let packedLines = 0;
+    let totalQty = 0;
 
-  const hasFilter = woSearch || skuSearch || descSearch;
+    for (const l of lines) {
+      const p = packedByLine.get(l.id) ?? 0;
+      const st = getLineStatus(l, p);
+      totalQty += l.quantity;
+      if (st === "full") packedLines++;
+      const s = woMap.get(l.workOrder) ?? { total: 0, full: 0 };
+      s.total++;
+      if (st === "full") s.full++;
+      woMap.set(l.workOrder, s);
+    }
+
+    const totalLines = lines.length;
+    const packedQty = Array.from(packedByLine.values()).reduce((s, v) => s + v, 0);
+    const totalWOs = woMap.size;
+    const completeWOs = Array.from(woMap.values()).filter((v) => v.total > 0 && v.full === v.total).length;
+
+    return {
+      totalLines, packedLines, remainingLines: totalLines - packedLines,
+      totalQty, packedQty, remainingQty: totalQty - packedQty,
+      pct: totalQty ? Math.round((packedQty / totalQty) * 100) : 0,
+      totalWOs, completeWOs,
+      openCartonCount: cartons.filter((c) => c.status !== "closed").length,
+      closedCartonCount: cartons.filter((c) => c.status === "closed").length,
+    };
+  }, [lines, cartons, packedByLine]);
+
+  // ── carton quality (for warning badge on cartons button)
+  const cartonsWithIssues = useMemo(
+    () => cartons.filter((c) => c.status !== "closed" && (!c.weight || !(c.length && c.width && c.height))).length,
+    [cartons],
+  );
+
+  const hasFilter = !!(woSearch || skuSearch || descSearch);
   const packLine = packLineId ? lines.find((l) => l.id === packLineId) ?? null : null;
   const activeCarton = activeCartonId ? cartons.find((c) => c.id === activeCartonId) : null;
 
   // ── flat navigable list (follows current sort/group order)
   const flatRows = useMemo(
-    () => (woGroups ? woGroups.flatMap(([, ls]) => ls.slice().sort((a, b) => {
-      const o: Record<string, number> = { none: 0, partial: 1, full: 2 };
-      return o[getLineStatus(a, packedByLine.get(a.id) ?? 0)] - o[getLineStatus(b, packedByLine.get(b.id) ?? 0)];
-    })) : sortedLines),
-    [woGroups, sortedLines, packedByLine],
+    () =>
+      woGroups
+        ? woGroups.flatMap(([, ls]) => ls) // already sorted by SKU within group
+        : sortedLines,
+    [woGroups, sortedLines],
   );
 
   // Auto-select first row when filter is active and current selection is gone
@@ -195,77 +219,80 @@ function PackingWorkspace() {
     allocate(line.id, activeCartonId, remaining);
   }
 
+  // ── Row renderer ──────────────────────────────────────────────────────────
   function renderLine(l: ShipmentLine) {
     const packed = packedByLine.get(l.id) ?? 0;
     const remaining = l.quantity - packed;
     const status = getLineStatus(l, packed);
     const isSelected = l.id === selectedLineId;
     const rowBg = isSelected
-      ? "bg-brand-accent/8 ring-1 ring-inset ring-brand-accent/30"
-      : status === "full" ? "bg-green-50/50" : status === "partial" ? "bg-amber-50/40" : "";
-    const barColor =
-      status === "full" ? "bg-green-500" : status === "partial" ? "bg-amber-500" : "bg-red-400";
+      ? "bg-brand-accent/[0.07] ring-1 ring-inset ring-brand-accent/25"
+      : status === "full"
+        ? "bg-green-50/40"
+        : status === "partial"
+          ? "bg-amber-50/30"
+          : "";
+    const barColor = status === "full" ? "bg-green-500" : status === "partial" ? "bg-amber-500" : "bg-red-400";
 
     return (
       <tr
         key={l.id}
         ref={isSelected ? selectedRowRef : null}
         onClick={() => setSelectedLineId(l.id)}
-        className={`group border-b border-border/60 hover:bg-secondary/30 transition-colors cursor-pointer ${rowBg}`}
+        className={`group border-b border-border/50 hover:bg-secondary/25 transition-colors cursor-pointer ${rowBg}`}
       >
         {/* Action */}
-        <td className="py-3 px-4 text-center">
+        <td className="py-1.5 px-3 text-center">
           {remaining > 0 ? (
             <div className="flex items-center gap-1 justify-center">
               <button
-                onClick={() => (activeCartonId ? quickPack(l) : setPackLineId(l.id))}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                onClick={(e) => { e.stopPropagation(); activeCartonId ? quickPack(l) : setPackLineId(l.id); }}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold transition-colors ${
                   activeCartonId
                     ? "bg-brand-accent text-white hover:bg-cyan-700"
                     : "bg-brand text-primary-foreground hover:bg-zinc-800"
                 }`}
               >
-                {activeCartonId ? <Zap className="size-3.5" /> : <PackageCheck className="size-3.5" />}
-                אריזה
+                {activeCartonId ? <Zap className="size-3" /> : <PackageCheck className="size-3" />}
+                ארוז
               </button>
-              {/* When quick-pack active, show modal fallback button */}
               {activeCartonId && (
                 <button
-                  onClick={() => setPackLineId(l.id)}
+                  onClick={(e) => { e.stopPropagation(); setPackLineId(l.id); }}
                   title="פתח חלון אריזה"
-                  className="size-7 grid place-items-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+                  className="size-6 grid place-items-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
                 >
-                  <PackageCheck className="size-3.5" />
+                  <PackageCheck className="size-3" />
                 </button>
               )}
             </div>
           ) : (
-            <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-semibold text-green-700 bg-green-100/60">
-              <CheckCircle2 className="size-3.5" />
+            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold text-green-700 bg-green-100/60">
+              <CheckCircle2 className="size-3" />
               הושלם
             </span>
           )}
         </td>
         {/* Status bar */}
-        <td className="py-3 px-3">
-          <span className={`block w-2 h-8 rounded-full ${barColor}`} />
+        <td className="py-1.5 px-2">
+          <span className={`block w-1.5 h-5 rounded-full ${barColor}`} />
         </td>
         {/* SKU */}
-        <td className="py-3 px-2 font-mono text-[13px] font-semibold text-brand-accent whitespace-nowrap">{l.sku}</td>
+        <td className="py-1.5 px-2 font-mono text-[12px] font-semibold text-brand-accent whitespace-nowrap">{l.sku}</td>
         {/* Description */}
-        <td className="py-3 px-3 text-pretty max-w-[38ch] font-medium text-foreground">{l.description}</td>
+        <td className="py-1.5 px-2 text-xs font-medium text-foreground max-w-[36ch] line-clamp-2">{l.description}</td>
         {/* Work Order */}
-        <td className="py-3 px-3 text-xs font-mono text-muted-foreground whitespace-nowrap">{l.workOrder}</td>
+        <td className="py-1.5 px-2 text-xs font-mono text-muted-foreground whitespace-nowrap">{l.workOrder}</td>
         {/* Batch */}
-        <td className="py-3 px-3 text-xs font-mono text-muted-foreground whitespace-nowrap">{l.batch}</td>
+        <td className="py-1.5 px-2 text-xs font-mono text-muted-foreground whitespace-nowrap">{l.batch}</td>
         {/* Original qty */}
-        <td className="py-3 px-3 text-center tabular-nums text-muted-foreground">{l.quantity.toLocaleString()}</td>
+        <td className="py-1.5 px-2 text-center tabular-nums text-xs text-muted-foreground">{l.quantity.toLocaleString()}</td>
         {/* Packed */}
-        <td className={`py-3 px-3 text-center tabular-nums font-semibold ${packed > 0 ? "text-green-700" : "text-zinc-400"}`}>
+        <td className={`py-1.5 px-2 text-center tabular-nums text-xs font-semibold ${packed > 0 ? "text-green-700" : "text-zinc-400"}`}>
           {packed.toLocaleString()}
         </td>
         {/* Remaining */}
-        <td className={`py-3 px-3 text-center tabular-nums font-semibold ${remaining === 0 ? "text-zinc-400" : "text-amber-700"}`}>
+        <td className={`py-1.5 px-2 text-center tabular-nums text-xs font-semibold ${remaining === 0 ? "text-zinc-400" : "text-amber-700"}`}>
           {remaining.toLocaleString()}
         </td>
       </tr>
@@ -286,6 +313,11 @@ function PackingWorkspace() {
         >
           <Package className="size-3.5" />
           קרטונים ({cartons.length})
+          {cartonsWithIssues > 0 && (
+            <span className="size-4 bg-amber-500 text-white rounded-full text-[9px] font-bold grid place-items-center shrink-0">
+              {cartonsWithIssues}
+            </span>
+          )}
         </button>
       }
     >
@@ -294,164 +326,188 @@ function PackingWorkspace() {
         {/* ── Main workspace ── */}
         <section className="flex-1 flex flex-col overflow-hidden min-w-0 bg-card">
 
-          {/* Search bar */}
-          <div className="px-4 py-3 border-b border-border shrink-0 flex items-center gap-3">
-            <div className="relative flex-1">
-              <Search className="absolute right-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+          {/* Search bar + controls (single row) */}
+          <div className="px-4 py-2.5 border-b border-border shrink-0 flex items-center gap-2">
+            {/* WO search — primary */}
+            <div className="relative" style={{ minWidth: "220px", flex: "2" }}>
+              <Search className="absolute right-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
               <input
                 autoFocus
                 value={woSearch}
                 onChange={(e) => setWoSearch(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
-                placeholder='חיפוש פקודת עבודה (פק"ע)...'
-                className="w-full bg-secondary/60 ring-1 ring-black/5 rounded-lg pr-10 pl-3 py-2.5 text-sm font-mono outline-none focus:ring-2 focus:ring-brand-accent/40 focus:bg-card transition-shadow"
+                placeholder='פקודת עבודה (פק"ע)...'
+                className="w-full bg-secondary/60 ring-1 ring-black/5 rounded-lg pr-9 pl-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-brand-accent/40 focus:bg-card transition-shadow"
               />
             </div>
-            <div className="relative w-44">
+            {/* SKU search */}
+            <div style={{ width: "140px", flexShrink: 0 }}>
               <input
                 value={skuSearch}
                 onChange={(e) => setSkuSearch(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
                 placeholder='מק"ט...'
-                className="w-full bg-secondary/60 ring-1 ring-black/5 rounded-lg px-3 py-2.5 text-sm font-mono outline-none focus:ring-2 focus:ring-brand-accent/40 focus:bg-card transition-shadow"
+                className="w-full bg-secondary/60 ring-1 ring-black/5 rounded-lg px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-brand-accent/40 focus:bg-card transition-shadow"
               />
             </div>
-            <div className="relative w-52">
+            {/* Description search */}
+            <div style={{ width: "180px", flexShrink: 0 }}>
               <input
                 value={descSearch}
                 onChange={(e) => setDescSearch(e.target.value)}
                 onKeyDown={handleSearchKeyDown}
                 placeholder="תיאור פריט..."
-                className="w-full bg-secondary/60 ring-1 ring-black/5 rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand-accent/40 focus:bg-card transition-shadow"
+                className="w-full bg-secondary/60 ring-1 ring-black/5 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand-accent/40 focus:bg-card transition-shadow"
               />
             </div>
             {hasFilter && (
               <button
                 onClick={clearSearch}
-                className="size-9 grid place-items-center rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                className="size-8 grid place-items-center rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors shrink-0"
                 title="נקה חיפוש (Esc)"
               >
-                <X className="size-4" />
+                <X className="size-3.5" />
               </button>
             )}
-            {/* Keyboard hint — only when filter active and results exist */}
-            {hasFilter && flatRows.length > 0 && (
-              <div className="text-[10px] text-muted-foreground/70 shrink-0 leading-tight tabular-nums hidden lg:block">
-                ↑↓ ניווט<br />Enter אריזה<br />Esc ניקוי
-              </div>
-            )}
-          </div>
 
-          {/* Controls row */}
-          <div className="px-4 py-2 border-b border-border bg-secondary/20 shrink-0 flex items-center gap-4 flex-wrap">
+            <div className="h-5 w-px bg-border shrink-0" />
 
-            {/* Sort */}
-            <div className="flex items-center gap-1">
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold ml-2 shrink-0">מיון:</span>
-              {(["status", "wo", "sku"] as const).map((m) => (
+            {/* Sort control */}
+            <div className="flex items-center gap-1 shrink-0">
+              {(["sku", "status", "wo"] as const).map((m) => (
                 <button
                   key={m}
                   onClick={() => setSortMode(m)}
-                  className={`px-2.5 py-1 text-xs rounded font-medium transition-colors ${
+                  className={`px-2 py-1 text-[11px] rounded font-medium transition-colors ${
                     sortMode === m
-                      ? "bg-card ring-1 ring-black/10 text-foreground shadow-sm"
+                      ? "bg-brand text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground hover:bg-secondary"
                   }`}
                 >
-                  {m === "status" ? "סטטוס" : m === "wo" ? 'פק"ע' : 'מק"ט'}
+                  {m === "sku" ? 'מק"ט' : m === "status" ? "סטטוס" : 'פק"ע'}
                 </button>
               ))}
             </div>
 
-            <div className="h-4 w-px bg-border shrink-0" />
-
             {/* Group by WO */}
             <button
               onClick={() => setGroupByWo((s) => !s)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded font-medium transition-colors ${
+              className={`flex items-center gap-1 px-2 py-1 text-[11px] rounded font-medium transition-colors shrink-0 ${
                 groupByWo
                   ? "bg-brand text-primary-foreground"
-                  : "bg-secondary text-muted-foreground hover:text-foreground hover:bg-zinc-200"
+                  : "text-muted-foreground hover:text-foreground hover:bg-secondary"
               }`}
             >
-              קיבוץ לפי פק"ע
+              קיבוץ
             </button>
 
-            <div className="h-4 w-px bg-border shrink-0" />
+            <div className="h-5 w-px bg-border shrink-0" />
 
             {/* Quick-pack carton selector */}
-            <div className="flex items-center gap-2">
-              <Zap className={`size-3.5 shrink-0 ${activeCartonId ? "text-brand-accent" : "text-muted-foreground"}`} />
-              <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold shrink-0">קרטון יעד:</span>
-              {openCartons.length > 0 ? (
-                <select
-                  value={activeCartonId ?? ""}
-                  onChange={(e) => setActiveCartonId(e.target.value || null)}
-                  className="text-xs bg-card ring-1 ring-black/5 rounded px-2 py-1 outline-none focus:ring-brand-accent cursor-pointer"
-                >
-                  <option value="">— ללא (פתח חלון) —</option>
-                  {openCartons.map((c) => (
-                    <option key={c.id} value={c.id}>{c.number}</option>
-                  ))}
-                </select>
-              ) : (
-                <span className="text-xs text-muted-foreground italic">אין קרטונים פתוחים</span>
-              )}
-              {activeCarton && (
-                <span className="text-[10px] bg-brand-accent/10 text-brand-accent px-2 py-0.5 rounded-full ring-1 ring-brand-accent/20 font-medium whitespace-nowrap shrink-0">
-                  ⚡ אריזה מהירה אל {activeCarton.number}
-                </span>
-              )}
-            </div>
+            <Zap className={`size-3.5 shrink-0 ${activeCartonId ? "text-brand-accent" : "text-muted-foreground"}`} />
+            {openCartons.length > 0 ? (
+              <select
+                value={activeCartonId ?? ""}
+                onChange={(e) => setActiveCartonId(e.target.value || null)}
+                className={`text-xs rounded px-2 py-1 outline-none cursor-pointer shrink-0 transition-colors ${
+                  activeCartonId
+                    ? "bg-brand-accent/10 text-brand-accent ring-1 ring-brand-accent/30 font-semibold"
+                    : "bg-card ring-1 ring-black/5 text-muted-foreground"
+                }`}
+              >
+                <option value="">— בחר קרטון יעד —</option>
+                {openCartons.map((c) => (
+                  <option key={c.id} value={c.id}>{c.number}</option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-[11px] text-muted-foreground italic shrink-0">אין קרטונים פתוחים</span>
+            )}
 
-            {/* Result count — pushed right */}
-            <div className="mr-auto text-[11px] text-muted-foreground tabular-nums">
+            {/* Result count */}
+            <div className="mr-auto text-[11px] text-muted-foreground tabular-nums shrink-0">
               {hasFilter
-                ? `${filteredLines.length.toLocaleString()} / ${lines.length.toLocaleString()} שורות`
+                ? `${filteredLines.length.toLocaleString()} / ${lines.length.toLocaleString()}`
                 : `${lines.length.toLocaleString()} שורות`}
             </div>
+
+            {/* KB hint */}
+            {hasFilter && flatRows.length > 0 && (
+              <div className="text-[9px] text-muted-foreground/60 shrink-0 leading-tight hidden xl:block">
+                ↑↓ · Enter · Esc
+              </div>
+            )}
           </div>
 
-          {/* Progress header */}
-          <div className="px-5 py-4 border-b border-border shrink-0">
-            <div className="flex items-center gap-6 flex-wrap">
-              <div className="min-w-[100px]">
-                <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">שורות ארוזות</div>
-                <div className="flex items-baseline gap-1">
-                  <span className="text-2xl font-bold tabular-nums text-green-700">{progress.packedLines.toLocaleString()}</span>
-                  <span className="text-sm text-muted-foreground tabular-nums">/ {progress.totalLines.toLocaleString()}</span>
+          {/* Progress dashboard */}
+          <div className="px-5 py-2.5 border-b border-border shrink-0 bg-secondary/10">
+            <div className="flex items-center gap-4 flex-wrap">
+
+              {/* WOs complete */}
+              <ProgStat
+                label='פק"עות'
+                value={`${progress.completeWOs} / ${progress.totalWOs}`}
+                done={progress.completeWOs === progress.totalWOs && progress.totalWOs > 0}
+              />
+              <div className="h-8 w-px bg-border shrink-0" />
+
+              {/* Lines */}
+              <ProgStat
+                label="שורות"
+                value={`${progress.packedLines.toLocaleString()} / ${progress.totalLines.toLocaleString()}`}
+                sub={`${progress.remainingLines} נותרו`}
+                done={progress.packedLines === progress.totalLines && progress.totalLines > 0}
+              />
+              <div className="h-8 w-px bg-border shrink-0" />
+
+              {/* Qty */}
+              <ProgStat
+                label="כמות"
+                value={`${progress.packedQty.toLocaleString()} / ${progress.totalQty.toLocaleString()}`}
+                sub={`${progress.remainingQty.toLocaleString()} יח׳ נותרו`}
+                done={progress.packedQty === progress.totalQty && progress.totalQty > 0}
+              />
+              <div className="h-8 w-px bg-border shrink-0" />
+
+              {/* Cartons */}
+              <div className="flex items-center gap-3 shrink-0">
+                <div className="text-center">
+                  <div className="text-[9px] uppercase tracking-wider font-bold text-amber-600/80 mb-0.5">פתוחים</div>
+                  <div className="text-lg font-bold tabular-nums text-amber-600 leading-none">{progress.openCartonCount}</div>
                 </div>
-                <div className="text-[11px] text-muted-foreground tabular-nums mt-0.5">{progress.remainingLines.toLocaleString()} נותרו</div>
-              </div>
-              <div className="h-12 w-px bg-border shrink-0" />
-              <div className="min-w-[130px]">
-                <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">כמות ארוזה</div>
-                <div className="flex items-baseline gap-1">
-                  <span className="text-2xl font-bold tabular-nums text-green-700">{progress.packedQty.toLocaleString()}</span>
-                  <span className="text-sm text-muted-foreground tabular-nums">/ {progress.totalQty.toLocaleString()}</span>
+                <div className="text-center">
+                  <div className="text-[9px] uppercase tracking-wider font-bold text-green-700/80 mb-0.5">סגורים</div>
+                  <div className="text-lg font-bold tabular-nums text-green-700 leading-none">{progress.closedCartonCount}</div>
                 </div>
-                <div className="text-[11px] text-muted-foreground tabular-nums mt-0.5">{progress.remainingQty.toLocaleString()} יח׳ נותרו</div>
               </div>
-              <div className="h-12 w-px bg-border shrink-0" />
-              <div className="flex items-center gap-4 flex-1 min-w-[200px]">
-                <div className="text-3xl font-bold tabular-nums text-brand-accent shrink-0">{progress.pct}%</div>
+              <div className="h-8 w-px bg-border shrink-0" />
+
+              {/* Progress bar */}
+              <div className="flex items-center gap-3 flex-1 min-w-[160px]">
+                <div className={`text-2xl font-bold tabular-nums shrink-0 ${progress.pct === 100 ? "text-green-600" : "text-brand-accent"}`}>
+                  {progress.pct}%
+                </div>
                 <div className="flex-1">
-                  <div className="flex justify-between text-[11px] text-muted-foreground mb-1.5">
-                    <span className="font-semibold">התקדמות אריזה</span>
-                    {progress.pct === 100 && (
-                      <span className="text-green-700 font-bold flex items-center gap-1">
-                        <CheckCircle2 className="size-3" /> הושלם
-                      </span>
-                    )}
-                  </div>
-                  <div className="h-3 bg-secondary rounded-full overflow-hidden">
+                  <div className="h-2 bg-secondary rounded-full overflow-hidden">
                     <div
                       className={`h-full rounded-full transition-all duration-500 ${progress.pct === 100 ? "bg-green-500" : "bg-brand-accent"}`}
                       style={{ width: `${progress.pct}%` }}
                     />
                   </div>
+                  {progress.pct === 100 && (
+                    <div className="text-[10px] text-green-700 font-bold flex items-center gap-0.5 mt-0.5">
+                      <CheckCircle2 className="size-2.5" /> אריזה הושלמה
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {/* Quick-pack status chip */}
+              {activeCarton && (
+                <div className="text-[10px] bg-brand-accent/10 text-brand-accent px-2 py-0.5 rounded-full ring-1 ring-brand-accent/20 font-semibold whitespace-nowrap shrink-0 flex items-center gap-1">
+                  <Zap className="size-2.5" /> {activeCarton.number}
+                </div>
+              )}
             </div>
           </div>
 
@@ -459,16 +515,16 @@ function PackingWorkspace() {
           <div className="flex-1 overflow-auto">
             <table className="w-full text-right border-separate border-spacing-0">
               <thead className="sticky top-0 bg-card z-10 shadow-[0_1px_0_0_var(--color-border)]">
-                <tr className="text-xs font-medium text-muted-foreground">
-                  <th className="py-3 px-4 font-medium text-center w-32">פעולה</th>
-                  <th className="py-3 px-3 font-medium w-3"></th>
-                  <th className="py-3 px-2 font-medium">מק״ט</th>
-                  <th className="py-3 px-3 font-medium">תיאור</th>
-                  <th className="py-3 px-3 font-medium">פק״ע</th>
-                  <th className="py-3 px-3 font-medium">אצווה</th>
-                  <th className="py-3 px-3 font-medium text-center">כמות מקורית</th>
-                  <th className="py-3 px-3 font-medium text-center">נארז</th>
-                  <th className="py-3 px-3 font-medium text-center">נותר</th>
+                <tr className="text-[11px] font-medium text-muted-foreground">
+                  <th className="py-2 px-3 font-medium text-center w-28">פעולה</th>
+                  <th className="py-2 px-2 font-medium w-2"></th>
+                  <th className="py-2 px-2 font-medium">מק״ט</th>
+                  <th className="py-2 px-2 font-medium">תיאור</th>
+                  <th className="py-2 px-2 font-medium">פק״ע</th>
+                  <th className="py-2 px-2 font-medium">אצווה</th>
+                  <th className="py-2 px-2 font-medium text-center">כמות</th>
+                  <th className="py-2 px-2 font-medium text-center">נארז</th>
+                  <th className="py-2 px-2 font-medium text-center">נותר</th>
                 </tr>
               </thead>
               <tbody className="text-sm">
@@ -481,54 +537,64 @@ function PackingWorkspace() {
                     </td>
                   </tr>
                 ) : woGroups ? (
-                  // Grouped view
+                  // Grouped view — WOs alphabetical, lines SKU alphabetical within
                   woGroups.map(([wo, woLines]) => {
                     const woTotalQty = woLines.reduce((s, l) => s + l.quantity, 0);
                     const woPackedQty = woLines.reduce((s, l) => s + (packedByLine.get(l.id) ?? 0), 0);
-                    const woPackedLines = woLines.filter(
+                    const woFullLines = woLines.filter(
                       (l) => getLineStatus(l, packedByLine.get(l.id) ?? 0) === "full",
                     ).length;
                     const woPct = woTotalQty ? Math.round((woPackedQty / woTotalQty) * 100) : 0;
+                    const woStatus = woPct === 100 ? "complete" : woPackedQty === 0 ? "none" : "partial";
+
+                    const headerBg = woStatus === "complete"
+                      ? "bg-green-50/70"
+                      : woStatus === "partial"
+                        ? "bg-amber-50/50"
+                        : "bg-secondary/50";
+                    const dotColor = woStatus === "complete"
+                      ? "bg-green-500"
+                      : woStatus === "partial"
+                        ? "bg-amber-500"
+                        : "bg-red-400";
+                    const textColor = woStatus === "complete" ? "text-green-800" : "text-foreground";
+
                     return (
                       <Fragment key={wo}>
                         {/* WO group header */}
-                        <tr className="bg-secondary/50 border-b border-border">
-                          <td colSpan={9} className="py-2 px-4">
-                            <div className="flex items-center gap-4">
-                              <span className="font-mono text-sm font-bold text-foreground">{wo}</span>
+                        <tr className={`border-b border-border ${headerBg}`}>
+                          <td colSpan={9} className="py-1.5 px-4">
+                            <div className="flex items-center gap-3">
+                              <span className={`block w-2 h-2 rounded-full shrink-0 ${dotColor}`} />
+                              <span className={`font-mono text-sm font-bold ${textColor}`}>{wo}</span>
                               <span className="text-xs text-muted-foreground tabular-nums">
-                                {woPackedLines}/{woLines.length} שורות
+                                {woFullLines}/{woLines.length} שורות
                               </span>
                               <span className="text-xs text-muted-foreground tabular-nums">
                                 {woPackedQty.toLocaleString()}/{woTotalQty.toLocaleString()} יח׳
                               </span>
-                              <div className="flex items-center gap-2 flex-1 max-w-48">
-                                <div className="flex-1 h-1.5 bg-secondary rounded-full overflow-hidden">
+                              <div className="flex items-center gap-2 flex-1 max-w-36">
+                                <div className="flex-1 h-1.5 bg-secondary/80 rounded-full overflow-hidden">
                                   <div
-                                    className={`h-full rounded-full ${woPct === 100 ? "bg-green-500" : "bg-brand-accent"}`}
+                                    className={`h-full rounded-full transition-all ${dotColor}`}
                                     style={{ width: `${woPct}%` }}
                                   />
                                 </div>
-                                <span className="text-xs font-semibold tabular-nums text-muted-foreground">{woPct}%</span>
+                                <span className="text-[11px] font-semibold tabular-nums text-muted-foreground">{woPct}%</span>
                               </div>
+                              {woStatus === "complete" && (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-green-700 bg-green-100 px-1.5 py-0.5 rounded-full shrink-0">
+                                  <CheckCircle2 className="size-2.5" /> הושלם
+                                </span>
+                              )}
                             </div>
                           </td>
                         </tr>
-                        {/* Lines in this WO (sorted by status within group) */}
-                        {[...woLines]
-                          .sort((a, b) => {
-                            const o: Record<string, number> = { none: 0, partial: 1, full: 2 };
-                            return (
-                              o[getLineStatus(a, packedByLine.get(a.id) ?? 0)] -
-                              o[getLineStatus(b, packedByLine.get(b.id) ?? 0)]
-                            );
-                          })
-                          .map(renderLine)}
+                        {woLines.map(renderLine)}
                       </Fragment>
                     );
                   })
                 ) : (
-                  // Flat view
                   sortedLines.map(renderLine)
                 )}
               </tbody>
@@ -538,20 +604,20 @@ function PackingWorkspace() {
 
         {/* ── Cartons panel (collapsible) ── */}
         {showCartons && (
-          <aside className="w-72 border-r border-border bg-surface-muted flex flex-col shrink-0">
-            <div className="p-3 flex items-center justify-between border-b border-border">
-              <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                קרטונים <span className="font-normal">({cartons.length})</span>
+          <aside className="w-64 border-r border-border bg-surface-muted flex flex-col shrink-0">
+            <div className="px-3 py-2 flex items-center justify-between border-b border-border">
+              <h2 className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                קרטונים ({cartons.length})
               </h2>
               <button
                 onClick={() => createCarton()}
-                className="size-7 bg-brand text-primary-foreground rounded-md flex items-center justify-center hover:bg-zinc-800 transition-colors"
+                className="size-6 bg-brand text-primary-foreground rounded flex items-center justify-center hover:bg-zinc-800 transition-colors"
                 title="קרטון חדש"
               >
-                <Plus className="size-4" />
+                <Plus className="size-3.5" />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+            <div className="flex-1 overflow-y-auto p-2 flex flex-col gap-1.5">
               {cartons.map((c) => {
                 const qty = getCartonTotalQty(allocations, c.id);
                 const skuCount = new Set(allocations.filter((a) => a.cartonId === c.id).map((a) => a.lineId)).size;
@@ -562,7 +628,7 @@ function PackingWorkspace() {
                   <div
                     key={c.id}
                     onClick={() => c.status !== "closed" && setActiveCartonId(c.id === activeCartonId ? null : c.id)}
-                    className={`bg-card rounded-lg ring-1 p-3 flex flex-col gap-2 cursor-pointer transition-all ${
+                    className={`bg-card rounded-lg ring-1 p-2.5 flex flex-col gap-1.5 cursor-pointer transition-all ${
                       isActive
                         ? "ring-brand-accent ring-2"
                         : c.status === "closed"
@@ -571,60 +637,59 @@ function PackingWorkspace() {
                     }`}
                   >
                     <div className="flex justify-between items-start">
-                      <div className="flex flex-col">
-                        <div className="flex items-center gap-1.5">
-                          {isActive && <Zap className="size-3 text-brand-accent" />}
-                          <span className="text-[10px] font-bold text-muted-foreground tracking-wider">{c.number}</span>
+                      <div className="flex items-center gap-1.5">
+                        {isActive && <Zap className="size-3 text-brand-accent shrink-0" />}
+                        <div>
+                          <div className="text-[11px] font-bold text-foreground">{c.number}</div>
+                          <Link
+                            to="/cartons/$cartonId"
+                            params={{ cartonId: c.id }}
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-[10px] font-medium text-brand-accent hover:underline flex items-center gap-0.5"
+                          >
+                            פרטים <ExternalLink className="size-2.5" />
+                          </Link>
                         </div>
-                        <Link
-                          to="/cartons/$cartonId"
-                          params={{ cartonId: c.id }}
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-xs font-semibold text-brand-accent hover:underline flex items-center gap-1"
-                        >
-                          פרטים <ExternalLink className="size-3" />
-                        </Link>
                       </div>
                       <CartonStatusBadge status={c.status} />
                     </div>
-                    <div className="grid grid-cols-3 gap-1.5 text-[10px]">
-                      <div className="bg-surface-muted px-1.5 py-1 rounded">
-                        <div className="text-muted-foreground">פריטים</div>
-                        <div className="font-semibold tabular-nums text-foreground">{qty}</div>
+                    <div className="grid grid-cols-3 gap-1 text-[10px]">
+                      <div className="bg-surface-muted px-1.5 py-1 rounded text-center">
+                        <div className="text-muted-foreground">יח׳</div>
+                        <div className="font-semibold tabular-nums">{qty}</div>
                       </div>
-                      <div className="bg-surface-muted px-1.5 py-1 rounded">
+                      <div className="bg-surface-muted px-1.5 py-1 rounded text-center">
                         <div className="text-muted-foreground">מק״טים</div>
-                        <div className="font-semibold tabular-nums text-foreground">{skuCount}</div>
+                        <div className="font-semibold tabular-nums">{skuCount}</div>
                       </div>
-                      <div className="bg-surface-muted px-1.5 py-1 rounded">
-                        <div className="text-muted-foreground">משקל</div>
-                        <div className="font-semibold tabular-nums text-foreground">{c.weight ? `${c.weight}` : "—"}</div>
+                      <div className="bg-surface-muted px-1.5 py-1 rounded text-center">
+                        <div className="text-muted-foreground">ק״ג</div>
+                        <div className={`font-semibold tabular-nums ${!c.weight ? "text-amber-600" : ""}`}>
+                          {c.weight ? c.weight : "—"}
+                        </div>
                       </div>
                     </div>
                     {(missingWeight || missingDims) && c.status !== "closed" && (
-                      <div className="flex items-center gap-1.5 text-[10px] text-amber-700 bg-amber-50 ring-1 ring-amber-200/50 px-2 py-1 rounded">
-                        <AlertTriangle className="size-3" />
-                        {missingWeight && missingDims ? "חסר משקל וממדים" : missingWeight ? "חסר משקל" : "חסרים ממדים"}
+                      <div className="flex items-center gap-1 text-[9px] text-amber-700 bg-amber-50 ring-1 ring-amber-200/50 px-1.5 py-0.5 rounded">
+                        <AlertTriangle className="size-2.5 shrink-0" />
+                        {missingWeight && missingDims ? "חסר משקל + ממדים" : missingWeight ? "חסר משקל" : "חסרים ממדים"}
                       </div>
                     )}
-                    <div className="flex gap-1.5">
+                    <div className="flex gap-1">
                       {c.status !== "closed" ? (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             if (confirm(`לסגור את ${c.number}?`)) setCartonStatus(c.id, "closed");
                           }}
-                          className="flex-1 text-[11px] bg-brand text-primary-foreground py-1 rounded font-medium hover:bg-zinc-800"
+                          className="flex-1 text-[10px] bg-brand text-primary-foreground py-0.5 rounded font-medium hover:bg-zinc-800"
                         >
                           סגור
                         </button>
                       ) : (
                         <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setCartonStatus(c.id, "packing");
-                          }}
-                          className="flex-1 text-[11px] bg-secondary text-foreground py-1 rounded font-medium hover:bg-zinc-200"
+                          onClick={(e) => { e.stopPropagation(); setCartonStatus(c.id, "packing"); }}
+                          className="flex-1 text-[10px] bg-secondary text-foreground py-0.5 rounded font-medium hover:bg-zinc-200"
                         >
                           פתח
                         </button>
@@ -635,9 +700,9 @@ function PackingWorkspace() {
                             e.stopPropagation();
                             if (confirm(`למחוק את ${c.number}?`)) deleteCarton(c.id);
                           }}
-                          className="size-6 grid place-items-center bg-secondary hover:bg-red-50 hover:text-destructive rounded transition-colors"
+                          className="size-5 grid place-items-center bg-secondary hover:bg-red-50 hover:text-destructive rounded transition-colors"
                         >
-                          <X className="size-3" />
+                          <X className="size-2.5" />
                         </button>
                       )}
                     </div>
@@ -646,10 +711,10 @@ function PackingWorkspace() {
               })}
               <button
                 onClick={() => createCarton()}
-                className="border-2 border-dashed border-border rounded-lg py-4 flex flex-col items-center justify-center gap-1 text-muted-foreground hover:border-brand-accent hover:text-brand-accent transition-colors"
+                className="border-2 border-dashed border-border rounded-lg py-3 flex flex-col items-center justify-center gap-1 text-muted-foreground hover:border-brand-accent hover:text-brand-accent transition-colors"
               >
-                <Package className="size-4" />
-                <span className="text-[11px] font-medium">+ קרטון חדש</span>
+                <Package className="size-3.5" />
+                <span className="text-[10px] font-medium">+ קרטון חדש</span>
               </button>
             </div>
           </aside>
@@ -675,9 +740,22 @@ function PackingWorkspace() {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PackModal (unchanged logic, autoFocus quantity input added)
-// ─────────────────────────────────────────────────────────────────────────────
+// ── ProgStat ──────────────────────────────────────────────────────────────────
+
+function ProgStat({ label, value, sub, done }: { label: string; value: string; sub?: string; done?: boolean }) {
+  return (
+    <div className="shrink-0">
+      <div className="text-[9px] uppercase tracking-wider font-bold text-muted-foreground mb-0.5">{label}</div>
+      <div className={`text-base font-bold tabular-nums leading-none ${done ? "text-green-700" : "text-foreground"}`}>
+        {value}
+        {done && <CheckCircle2 className="inline size-3 mr-1 text-green-600" />}
+      </div>
+      {sub && <div className="text-[10px] text-muted-foreground tabular-nums mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+// ── PackModal ─────────────────────────────────────────────────────────────────
 
 function nextDraftId() { return `D${Math.random().toString(36).slice(2, 8)}`; }
 
@@ -742,7 +820,7 @@ function PackModal({
       <div onClick={(e) => e.stopPropagation()} dir="rtl" className="bg-card rounded-xl ring-1 ring-black/10 w-full max-w-2xl flex flex-col shadow-xl max-h-[90vh]">
         <div className="flex items-start justify-between p-5 border-b border-border">
           <div>
-            <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-bold">Pack Item — אריזת פריט</div>
+            <div className="text-[11px] text-muted-foreground uppercase tracking-wider font-bold">אריזת פריט</div>
             <h3 className="text-lg font-semibold mt-1">{line.sku}</h3>
             <p className="text-sm text-muted-foreground mt-0.5">{line.description}</p>
           </div>
