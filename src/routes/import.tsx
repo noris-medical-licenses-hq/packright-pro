@@ -70,7 +70,7 @@ function ImportPage() {
           destinationCountry: String(mapped.destinationCountry ?? ""),
           date: String(mapped.date ?? new Date().toISOString().slice(0, 10)),
         } as ShipmentLine;
-      }).filter((l) => REQUIRED.every((k) => (l as Record<string, unknown>)[k]));
+      }).filter((l) => REQUIRED.every((k) => Boolean((l as unknown as Record<string, unknown>)[k])));
 
       if (!lines.length) throw new Error("לא נמצאו רשומות תקינות בקובץ");
 
