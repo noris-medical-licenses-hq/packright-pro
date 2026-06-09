@@ -358,7 +358,7 @@ function PackModal({
 
   const allocatedTotal = drafts.reduce((s, d) => s + (Number(d.quantity) || 0), 0);
   const remainingToAllocate = remaining - allocatedTotal;
-  const valid = allocatedTotal > 0 && allocatedTotal <= remaining && drafts.every((d) => d.quantity > 0 && (d.cartonId !== "" || d.cartonId === "__new__"));
+  const valid = allocatedTotal > 0 && allocatedTotal <= remaining && drafts.every((d) => d.quantity > 0 && Boolean(d.cartonId));
 
   function updateDraft(id: string, patch: Partial<Draft>) {
     setDrafts((ds) => ds.map((d) => (d.id === id ? { ...d, ...patch } : d)));
