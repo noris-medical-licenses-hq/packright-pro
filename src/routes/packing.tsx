@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2,
   Plus,
@@ -49,6 +49,10 @@ function PackingWorkspace() {
 
   // ── pack modal
   const [packLineId, setPackLineId] = useState<string | null>(null);
+
+  // ── keyboard navigation
+  const [selectedLineId, setSelectedLineId] = useState<string | null>(null);
+  const selectedRowRef = useRef<HTMLTableRowElement>(null);
 
   // ── quick-pack: active carton target
   const [activeCartonId, setActiveCartonId] = useState<string | null>(null);
@@ -139,6 +143,44 @@ function PackingWorkspace() {
   const packLine = packLineId ? lines.find((l) => l.id === packLineId) ?? null : null;
   const activeCarton = activeCartonId ? cartons.find((c) => c.id === activeCartonId) : null;
 
+  // ── flat navigable list (follows current sort/group order)
+  const flatRows = useMemo(
+    () => (woGroups ? woGroups.flatMap(([, ls]) => ls.slice().sort((a, b) => {
+      const o: Record<string, number> = { none: 0, partial: 1, full: 2 };
+      return o[getLineStatus(a, packedByLine.get(a.id) ?? 0)] - o[getLineStatus(b, packedByLine.get(b.id) ?? 0)];
+    })) : sortedLines),
+    [woGroups, sortedLines, packedByLine],
+  );
+
+  // Auto-select first row when filter is active and current selection is gone
+  useEffect(() => {
+    if (!hasFilter) { setSelectedLineId(null); return; }
+    if (flatRows.length === 0) { setSelectedLineId(null); return; }
+    if (!flatRows.find((l) => l.id === selectedLineId)) setSelectedLineId(flatRows[0].id);
+  }, [flatRows, hasFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Scroll selected row into view
+  useEffect(() => {
+    selectedRowRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [selectedLineId]);
+
+  function navigateRow(delta: number) {
+    const idx = flatRows.findIndex((l) => l.id === selectedLineId);
+    const newIdx = Math.max(0, Math.min(flatRows.length - 1, idx < 0 ? 0 : idx + delta));
+    setSelectedLineId(flatRows[newIdx]?.id ?? null);
+  }
+
+  function handleSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape") { clearSearch(); e.preventDefault(); return; }
+    if (e.key === "ArrowDown") { navigateRow(1); e.preventDefault(); return; }
+    if (e.key === "ArrowUp") { navigateRow(-1); e.preventDefault(); return; }
+    if (e.key === "Enter" && selectedLineId) {
+      const line = flatRows.find((l) => l.id === selectedLineId);
+      if (line) { activeCartonId ? quickPack(line) : setPackLineId(line.id); }
+      e.preventDefault();
+    }
+  }
+
   function clearSearch() {
     setWoSearch("");
     setSkuSearch("");
@@ -157,13 +199,20 @@ function PackingWorkspace() {
     const packed = packedByLine.get(l.id) ?? 0;
     const remaining = l.quantity - packed;
     const status = getLineStatus(l, packed);
-    const rowBg =
-      status === "full" ? "bg-green-50/50" : status === "partial" ? "bg-amber-50/40" : "";
+    const isSelected = l.id === selectedLineId;
+    const rowBg = isSelected
+      ? "bg-brand-accent/8 ring-1 ring-inset ring-brand-accent/30"
+      : status === "full" ? "bg-green-50/50" : status === "partial" ? "bg-amber-50/40" : "";
     const barColor =
       status === "full" ? "bg-green-500" : status === "partial" ? "bg-amber-500" : "bg-red-400";
 
     return (
-      <tr key={l.id} className={`group border-b border-border/60 hover:bg-secondary/30 transition-colors ${rowBg}`}>
+      <tr
+        key={l.id}
+        ref={isSelected ? selectedRowRef : null}
+        onClick={() => setSelectedLineId(l.id)}
+        className={`group border-b border-border/60 hover:bg-secondary/30 transition-colors cursor-pointer ${rowBg}`}
+      >
         {/* Action */}
         <td className="py-3 px-4 text-center">
           {remaining > 0 ? (
@@ -253,6 +302,7 @@ function PackingWorkspace() {
                 autoFocus
                 value={woSearch}
                 onChange={(e) => setWoSearch(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
                 placeholder='חיפוש פקודת עבודה (פק"ע)...'
                 className="w-full bg-secondary/60 ring-1 ring-black/5 rounded-lg pr-10 pl-3 py-2.5 text-sm font-mono outline-none focus:ring-2 focus:ring-brand-accent/40 focus:bg-card transition-shadow"
               />
@@ -261,6 +311,7 @@ function PackingWorkspace() {
               <input
                 value={skuSearch}
                 onChange={(e) => setSkuSearch(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
                 placeholder='מק"ט...'
                 className="w-full bg-secondary/60 ring-1 ring-black/5 rounded-lg px-3 py-2.5 text-sm font-mono outline-none focus:ring-2 focus:ring-brand-accent/40 focus:bg-card transition-shadow"
               />
@@ -269,6 +320,7 @@ function PackingWorkspace() {
               <input
                 value={descSearch}
                 onChange={(e) => setDescSearch(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
                 placeholder="תיאור פריט..."
                 className="w-full bg-secondary/60 ring-1 ring-black/5 rounded-lg px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-brand-accent/40 focus:bg-card transition-shadow"
               />
@@ -277,10 +329,16 @@ function PackingWorkspace() {
               <button
                 onClick={clearSearch}
                 className="size-9 grid place-items-center rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors shrink-0"
-                title="נקה חיפוש"
+                title="נקה חיפוש (Esc)"
               >
                 <X className="size-4" />
               </button>
+            )}
+            {/* Keyboard hint — only when filter active and results exist */}
+            {hasFilter && flatRows.length > 0 && (
+              <div className="text-[10px] text-muted-foreground/70 shrink-0 leading-tight tabular-nums hidden lg:block">
+                ↑↓ ניווט<br />Enter אריזה<br />Esc ניקוי
+              </div>
             )}
           </div>
 
