@@ -59,18 +59,29 @@ export const useStore = create<State>()(
           audit: log(s, "ייבוא קובץ", importEntry.fileName),
         })),
       replaceSession: (newLines, fileName) =>
-        set((s) => ({
-          lines: newLines,
-          cartons: [],
-          allocations: [],
-          activeFile: {
-            name: fileName,
-            loadedAt: new Date().toISOString(),
-            lineCount: newLines.length,
-            totalQty: newLines.reduce((sum, l) => sum + l.quantity, 0),
-          },
-          audit: log(s, "החלפת קובץ פעיל", `${fileName} (${newLines.length} שורות)`),
-        })),
+        set((s) => {
+          const now = new Date().toISOString();
+          const totalQty = newLines.reduce((sum, l) => sum + l.quantity, 0);
+          const entry: ImportEntry = {
+            id: `IMP${Date.now()}`,
+            fileName,
+            uploadedAt: now,
+            deliveries: new Set(newLines.map((l) => l.deliveryNumber).filter(Boolean)).size,
+            workOrders: new Set(newLines.map((l) => l.workOrder)).size,
+            batches: new Set(newLines.map((l) => l.batch)).size,
+            skus: new Set(newLines.map((l) => l.sku)).size,
+            totalQty,
+            status: "success",
+          };
+          return {
+            lines: newLines,
+            cartons: [],
+            allocations: [],
+            imports: [entry, ...s.imports],
+            activeFile: { name: fileName, loadedAt: now, lineCount: newLines.length, totalQty },
+            audit: log(s, "החלפת קובץ פעיל", `${fileName} (${newLines.length} שורות)`),
+          };
+        }),
       createCarton: (manualNumber) => {
         const state = get();
         const nums = state.cartons.map((c) => { const m = c.number.match(/(\d+)$/); return m ? Number(m[1]) : 0; });

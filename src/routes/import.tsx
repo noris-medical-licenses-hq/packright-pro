@@ -306,7 +306,6 @@ function ReplaceSessionPage() {
         {step === "review" && parseResult && pendingLines !== null && pendingName && (
           <ReviewView
             parseResult={parseResult}
-            pendingName={pendingName}
             pendingLines={pendingLines}
             oldCount={lines.length}
             importErrors={pendingErrors}
@@ -421,7 +420,6 @@ function ReviewView({
   onProceed,
 }: {
   parseResult: ParseResult;
-  pendingName: string;
   pendingLines: ShipmentLine[];
   oldCount: number;
   importErrors: ImportError[];
