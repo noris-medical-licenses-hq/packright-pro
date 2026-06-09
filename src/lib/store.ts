@@ -73,8 +73,9 @@ export const useStore = create<State>()(
         })),
       createCarton: (manualNumber) => {
         const state = get();
-        const nextNum = state.cartons.length + 1;
-        const number = manualNumber ?? `CARTON-${String(nextNum).padStart(3, "0")}`;
+        const nums = state.cartons.map((c) => { const m = c.number.match(/(\d+)$/); return m ? Number(m[1]) : 0; });
+        const maxNum = nums.length > 0 ? Math.max(...nums) : 0;
+        const number = manualNumber ?? `CARTON-${String(maxNum + 1).padStart(3, "0")}`;
         const carton: Carton = { id: `K${Date.now()}`, number, status: "open", createdAt: new Date().toISOString() };
         set((s) => ({ cartons: [...s.cartons, carton], audit: log(s, "יצירת קרטון", number) }));
         return carton;

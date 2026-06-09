@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
   Plus,
@@ -11,6 +11,7 @@ import {
   Trash2,
   MoveRight,
   PackageCheck,
+  Zap,
 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
 import { CartonStatusBadge } from "@/components/StatusBadge";
@@ -18,21 +19,59 @@ import { getCartonTotalQty, getLineStatus, getPackedForLine, useStore } from "@/
 import type { Carton, ShipmentLine } from "@/lib/types";
 
 export const Route = createFileRoute("/packing")({
-  head: () => ({ meta: [{ title: "שולחן אריזה — Packing Control Center" }, { name: "description", content: "שולחן עבודה לאריזת משלוחים ברמת שורת מוצר" }] }),
+  head: () => ({
+    meta: [
+      { title: "שולחן אריזה — Packing Control Center" },
+      { name: "description", content: "שולחן עבודה לאריזת משלוחים ברמת שורת מוצר" },
+    ],
+  }),
   component: PackingWorkspace,
 });
 
 type Draft = { id: string; cartonId: string | "__new__"; quantity: number; newNumber?: string };
+type SortMode = "status" | "wo" | "sku";
 
 function PackingWorkspace() {
-  const { lines, cartons, allocations, createCarton, allocate, updateAllocation, removeAllocation, moveAllocation, setCartonStatus, deleteCarton } = useStore();
+  const {
+    lines, cartons, allocations,
+    createCarton, allocate, updateAllocation, removeAllocation, moveAllocation, setCartonStatus, deleteCarton,
+  } = useStore();
 
+  // ── search
   const [woSearch, setWoSearch] = useState("");
   const [skuSearch, setSkuSearch] = useState("");
   const [descSearch, setDescSearch] = useState("");
+
+  // ── view controls
+  const [sortMode, setSortMode] = useState<SortMode>("status");
+  const [groupByWo, setGroupByWo] = useState(false);
   const [showCartons, setShowCartons] = useState(false);
+
+  // ── pack modal
   const [packLineId, setPackLineId] = useState<string | null>(null);
 
+  // ── quick-pack: active carton target
+  const [activeCartonId, setActiveCartonId] = useState<string | null>(null);
+  const openCartons = useMemo(() => cartons.filter((c) => c.status !== "closed"), [cartons]);
+
+  // Auto-select single open carton; clear if it gets closed
+  useEffect(() => {
+    setActiveCartonId((cur) => {
+      const stillOpen = openCartons.find((c) => c.id === cur);
+      if (cur && !stillOpen) return null;
+      if (!cur && openCartons.length === 1) return openCartons[0].id;
+      return cur;
+    });
+  }, [openCartons]);
+
+  // ── performance: O(M) allocation map instead of O(N×M) per-line scans
+  const packedByLine = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const a of allocations) m.set(a.lineId, (m.get(a.lineId) ?? 0) + a.quantity);
+    return m;
+  }, [allocations]);
+
+  // ── filter
   const filteredLines = useMemo(() => {
     const wo = woSearch.trim();
     const sku = skuSearch.trim().toLowerCase();
@@ -46,31 +85,142 @@ function PackingWorkspace() {
     });
   }, [lines, woSearch, skuSearch, descSearch]);
 
+  // ── sort
+  const sortedLines = useMemo(() => {
+    const arr = [...filteredLines];
+    if (sortMode === "status") {
+      const order: Record<string, number> = { none: 0, partial: 1, full: 2 };
+      arr.sort(
+        (a, b) =>
+          order[getLineStatus(a, packedByLine.get(a.id) ?? 0)] -
+          order[getLineStatus(b, packedByLine.get(b.id) ?? 0)],
+      );
+    } else if (sortMode === "wo") {
+      arr.sort((a, b) => a.workOrder.localeCompare(b.workOrder, "he"));
+    } else {
+      arr.sort((a, b) => a.sku.localeCompare(b.sku));
+    }
+    return arr;
+  }, [filteredLines, sortMode, packedByLine]);
+
+  // ── WO groups (only when groupByWo is on)
+  const woGroups = useMemo(() => {
+    if (!groupByWo) return null;
+    const map = new Map<string, ShipmentLine[]>();
+    for (const l of sortedLines) {
+      const arr = map.get(l.workOrder) ?? [];
+      arr.push(l);
+      map.set(l.workOrder, arr);
+    }
+    // Sort groups: most incomplete first
+    return Array.from(map.entries()).sort(([, a], [, b]) => {
+      const pctA = a.reduce((s, l) => s + (packedByLine.get(l.id) ?? 0), 0) / a.reduce((s, l) => s + l.quantity, 0);
+      const pctB = b.reduce((s, l) => s + (packedByLine.get(l.id) ?? 0), 0) / b.reduce((s, l) => s + l.quantity, 0);
+      return (isNaN(pctA) ? 0 : pctA) - (isNaN(pctB) ? 0 : pctB);
+    });
+  }, [groupByWo, sortedLines, packedByLine]);
+
+  // ── overall progress
   const progress = useMemo(() => {
     const totalLines = lines.length;
-    const packedLines = lines.filter(
-      (l) => getLineStatus(l, getPackedForLine(allocations, l.id)) === "full",
-    ).length;
+    const packedLines = lines.filter((l) => getLineStatus(l, packedByLine.get(l.id) ?? 0) === "full").length;
     const totalQty = lines.reduce((s, l) => s + l.quantity, 0);
-    const packedQty = allocations.reduce((s, a) => s + a.quantity, 0);
+    const packedQty = Array.from(packedByLine.values()).reduce((s, v) => s + v, 0);
     return {
-      totalLines,
-      packedLines,
+      totalLines, packedLines,
       remainingLines: totalLines - packedLines,
-      totalQty,
-      packedQty,
+      totalQty, packedQty,
       remainingQty: totalQty - packedQty,
       pct: totalQty ? Math.round((packedQty / totalQty) * 100) : 0,
     };
-  }, [lines, allocations]);
+  }, [lines, packedByLine]);
 
   const hasFilter = woSearch || skuSearch || descSearch;
   const packLine = packLineId ? lines.find((l) => l.id === packLineId) ?? null : null;
+  const activeCarton = activeCartonId ? cartons.find((c) => c.id === activeCartonId) : null;
 
   function clearSearch() {
     setWoSearch("");
     setSkuSearch("");
     setDescSearch("");
+  }
+
+  function quickPack(line: ShipmentLine) {
+    if (!activeCartonId) return;
+    const packed = packedByLine.get(line.id) ?? 0;
+    const remaining = line.quantity - packed;
+    if (remaining <= 0) return;
+    allocate(line.id, activeCartonId, remaining);
+  }
+
+  function renderLine(l: ShipmentLine) {
+    const packed = packedByLine.get(l.id) ?? 0;
+    const remaining = l.quantity - packed;
+    const status = getLineStatus(l, packed);
+    const rowBg =
+      status === "full" ? "bg-green-50/50" : status === "partial" ? "bg-amber-50/40" : "";
+    const barColor =
+      status === "full" ? "bg-green-500" : status === "partial" ? "bg-amber-500" : "bg-red-400";
+
+    return (
+      <tr key={l.id} className={`group border-b border-border/60 hover:bg-secondary/30 transition-colors ${rowBg}`}>
+        {/* Action */}
+        <td className="py-3 px-4 text-center">
+          {remaining > 0 ? (
+            <div className="flex items-center gap-1 justify-center">
+              <button
+                onClick={() => (activeCartonId ? quickPack(l) : setPackLineId(l.id))}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors ${
+                  activeCartonId
+                    ? "bg-brand-accent text-white hover:bg-cyan-700"
+                    : "bg-brand text-primary-foreground hover:bg-zinc-800"
+                }`}
+              >
+                {activeCartonId ? <Zap className="size-3.5" /> : <PackageCheck className="size-3.5" />}
+                אריזה
+              </button>
+              {/* When quick-pack active, show modal fallback button */}
+              {activeCartonId && (
+                <button
+                  onClick={() => setPackLineId(l.id)}
+                  title="פתח חלון אריזה"
+                  className="size-7 grid place-items-center rounded text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
+                >
+                  <PackageCheck className="size-3.5" />
+                </button>
+              )}
+            </div>
+          ) : (
+            <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-semibold text-green-700 bg-green-100/60">
+              <CheckCircle2 className="size-3.5" />
+              הושלם
+            </span>
+          )}
+        </td>
+        {/* Status bar */}
+        <td className="py-3 px-3">
+          <span className={`block w-2 h-8 rounded-full ${barColor}`} />
+        </td>
+        {/* SKU */}
+        <td className="py-3 px-2 font-mono text-[13px] font-semibold text-brand-accent whitespace-nowrap">{l.sku}</td>
+        {/* Description */}
+        <td className="py-3 px-3 text-pretty max-w-[38ch] font-medium text-foreground">{l.description}</td>
+        {/* Work Order */}
+        <td className="py-3 px-3 text-xs font-mono text-muted-foreground whitespace-nowrap">{l.workOrder}</td>
+        {/* Batch */}
+        <td className="py-3 px-3 text-xs font-mono text-muted-foreground whitespace-nowrap">{l.batch}</td>
+        {/* Original qty */}
+        <td className="py-3 px-3 text-center tabular-nums text-muted-foreground">{l.quantity.toLocaleString()}</td>
+        {/* Packed */}
+        <td className={`py-3 px-3 text-center tabular-nums font-semibold ${packed > 0 ? "text-green-700" : "text-zinc-400"}`}>
+          {packed.toLocaleString()}
+        </td>
+        {/* Remaining */}
+        <td className={`py-3 px-3 text-center tabular-nums font-semibold ${remaining === 0 ? "text-zinc-400" : "text-amber-700"}`}>
+          {remaining.toLocaleString()}
+        </td>
+      </tr>
+    );
   }
 
   return (
@@ -134,11 +284,79 @@ function PackingWorkspace() {
             )}
           </div>
 
-          {/* Progress header */}
-          <div className="px-5 py-4 border-b border-border shrink-0 bg-card">
-            <div className="flex items-center gap-6 flex-wrap">
+          {/* Controls row */}
+          <div className="px-4 py-2 border-b border-border bg-secondary/20 shrink-0 flex items-center gap-4 flex-wrap">
 
-              {/* Lines */}
+            {/* Sort */}
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold ml-2 shrink-0">מיון:</span>
+              {(["status", "wo", "sku"] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setSortMode(m)}
+                  className={`px-2.5 py-1 text-xs rounded font-medium transition-colors ${
+                    sortMode === m
+                      ? "bg-card ring-1 ring-black/10 text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground hover:bg-secondary"
+                  }`}
+                >
+                  {m === "status" ? "סטטוס" : m === "wo" ? 'פק"ע' : 'מק"ט'}
+                </button>
+              ))}
+            </div>
+
+            <div className="h-4 w-px bg-border shrink-0" />
+
+            {/* Group by WO */}
+            <button
+              onClick={() => setGroupByWo((s) => !s)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs rounded font-medium transition-colors ${
+                groupByWo
+                  ? "bg-brand text-primary-foreground"
+                  : "bg-secondary text-muted-foreground hover:text-foreground hover:bg-zinc-200"
+              }`}
+            >
+              קיבוץ לפי פק"ע
+            </button>
+
+            <div className="h-4 w-px bg-border shrink-0" />
+
+            {/* Quick-pack carton selector */}
+            <div className="flex items-center gap-2">
+              <Zap className={`size-3.5 shrink-0 ${activeCartonId ? "text-brand-accent" : "text-muted-foreground"}`} />
+              <span className="text-[10px] text-muted-foreground uppercase tracking-wider font-bold shrink-0">קרטון יעד:</span>
+              {openCartons.length > 0 ? (
+                <select
+                  value={activeCartonId ?? ""}
+                  onChange={(e) => setActiveCartonId(e.target.value || null)}
+                  className="text-xs bg-card ring-1 ring-black/5 rounded px-2 py-1 outline-none focus:ring-brand-accent cursor-pointer"
+                >
+                  <option value="">— ללא (פתח חלון) —</option>
+                  {openCartons.map((c) => (
+                    <option key={c.id} value={c.id}>{c.number}</option>
+                  ))}
+                </select>
+              ) : (
+                <span className="text-xs text-muted-foreground italic">אין קרטונים פתוחים</span>
+              )}
+              {activeCarton && (
+                <span className="text-[10px] bg-brand-accent/10 text-brand-accent px-2 py-0.5 rounded-full ring-1 ring-brand-accent/20 font-medium whitespace-nowrap shrink-0">
+                  ⚡ אריזה מהירה אל {activeCarton.number}
+                </span>
+              )}
+            </div>
+
+            {/* Result count — pushed right */}
+            <div className="mr-auto text-[11px] text-muted-foreground tabular-nums">
+              {hasFilter
+                ? `${filteredLines.length.toLocaleString()} / ${lines.length.toLocaleString()} שורות`
+                : `${lines.length.toLocaleString()} שורות`}
+            </div>
+          </div>
+
+          {/* Progress header */}
+          <div className="px-5 py-4 border-b border-border shrink-0">
+            <div className="flex items-center gap-6 flex-wrap">
               <div className="min-w-[100px]">
                 <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">שורות ארוזות</div>
                 <div className="flex items-baseline gap-1">
@@ -147,10 +365,7 @@ function PackingWorkspace() {
                 </div>
                 <div className="text-[11px] text-muted-foreground tabular-nums mt-0.5">{progress.remainingLines.toLocaleString()} נותרו</div>
               </div>
-
               <div className="h-12 w-px bg-border shrink-0" />
-
-              {/* Quantity */}
               <div className="min-w-[130px]">
                 <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">כמות ארוזה</div>
                 <div className="flex items-baseline gap-1">
@@ -159,14 +374,9 @@ function PackingWorkspace() {
                 </div>
                 <div className="text-[11px] text-muted-foreground tabular-nums mt-0.5">{progress.remainingQty.toLocaleString()} יח׳ נותרו</div>
               </div>
-
               <div className="h-12 w-px bg-border shrink-0" />
-
-              {/* Progress bar */}
               <div className="flex items-center gap-4 flex-1 min-w-[200px]">
-                <div className="text-3xl font-bold tabular-nums text-brand-accent shrink-0">
-                  {progress.pct}%
-                </div>
+                <div className="text-3xl font-bold tabular-nums text-brand-accent shrink-0">{progress.pct}%</div>
                 <div className="flex-1">
                   <div className="flex justify-between text-[11px] text-muted-foreground mb-1.5">
                     <span className="font-semibold">התקדמות אריזה</span>
@@ -178,15 +388,12 @@ function PackingWorkspace() {
                   </div>
                   <div className="h-3 bg-secondary rounded-full overflow-hidden">
                     <div
-                      className={`h-full rounded-full transition-all duration-500 ${
-                        progress.pct === 100 ? "bg-green-500" : "bg-brand-accent"
-                      }`}
+                      className={`h-full rounded-full transition-all duration-500 ${progress.pct === 100 ? "bg-green-500" : "bg-brand-accent"}`}
                       style={{ width: `${progress.pct}%` }}
                     />
                   </div>
                 </div>
               </div>
-
             </div>
           </div>
 
@@ -195,7 +402,7 @@ function PackingWorkspace() {
             <table className="w-full text-right border-separate border-spacing-0">
               <thead className="sticky top-0 bg-card z-10 shadow-[0_1px_0_0_var(--color-border)]">
                 <tr className="text-xs font-medium text-muted-foreground">
-                  <th className="py-3 px-4 font-medium text-center w-28">פעולה</th>
+                  <th className="py-3 px-4 font-medium text-center w-32">פעולה</th>
                   <th className="py-3 px-3 font-medium w-3"></th>
                   <th className="py-3 px-2 font-medium">מק״ט</th>
                   <th className="py-3 px-3 font-medium">תיאור</th>
@@ -207,90 +414,7 @@ function PackingWorkspace() {
                 </tr>
               </thead>
               <tbody className="text-sm">
-                {filteredLines.map((l) => {
-                  const packed = getPackedForLine(allocations, l.id);
-                  const remaining = l.quantity - packed;
-                  const status = getLineStatus(l, packed);
-                  const rowBg =
-                    status === "full"
-                      ? "bg-green-50/50"
-                      : status === "partial"
-                        ? "bg-amber-50/40"
-                        : "";
-                  const barColor =
-                    status === "full"
-                      ? "bg-green-500"
-                      : status === "partial"
-                        ? "bg-amber-500"
-                        : "bg-red-400";
-
-                  return (
-                    <tr
-                      key={l.id}
-                      className={`group border-b border-border/60 hover:bg-secondary/30 transition-colors ${rowBg}`}
-                    >
-                      {/* Action */}
-                      <td className="py-3 px-4 text-center">
-                        {remaining > 0 ? (
-                          <button
-                            onClick={() => setPackLineId(l.id)}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-brand text-primary-foreground hover:bg-zinc-800 transition-colors"
-                          >
-                            <PackageCheck className="size-3.5" />
-                            אריזה
-                          </button>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-semibold text-green-700 bg-green-100/60">
-                            <CheckCircle2 className="size-3.5" />
-                            הושלם
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Status bar */}
-                      <td className="py-3 px-3">
-                        <span className={`block w-2 h-8 rounded-full ${barColor}`} />
-                      </td>
-
-                      {/* SKU */}
-                      <td className="py-3 px-2 font-mono text-[13px] font-semibold text-brand-accent whitespace-nowrap">
-                        {l.sku}
-                      </td>
-
-                      {/* Description */}
-                      <td className="py-3 px-3 text-pretty max-w-[38ch] font-medium text-foreground">
-                        {l.description}
-                      </td>
-
-                      {/* Work Order */}
-                      <td className="py-3 px-3 text-xs font-mono text-muted-foreground whitespace-nowrap">
-                        {l.workOrder}
-                      </td>
-
-                      {/* Batch */}
-                      <td className="py-3 px-3 text-xs font-mono text-muted-foreground whitespace-nowrap">
-                        {l.batch}
-                      </td>
-
-                      {/* Original qty */}
-                      <td className="py-3 px-3 text-center tabular-nums text-muted-foreground">
-                        {l.quantity.toLocaleString()}
-                      </td>
-
-                      {/* Packed qty */}
-                      <td className={`py-3 px-3 text-center tabular-nums font-semibold ${packed > 0 ? "text-green-700" : "text-zinc-400"}`}>
-                        {packed.toLocaleString()}
-                      </td>
-
-                      {/* Remaining */}
-                      <td className={`py-3 px-3 text-center tabular-nums font-semibold ${remaining === 0 ? "text-zinc-400" : "text-amber-700"}`}>
-                        {remaining.toLocaleString()}
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {!filteredLines.length && (
+                {!filteredLines.length ? (
                   <tr>
                     <td colSpan={9} className="py-16 text-center text-sm text-muted-foreground">
                       {lines.length === 0
@@ -298,25 +422,59 @@ function PackingWorkspace() {
                         : "לא נמצאו שורות התואמות את החיפוש."}
                     </td>
                   </tr>
+                ) : woGroups ? (
+                  // Grouped view
+                  woGroups.map(([wo, woLines]) => {
+                    const woTotalQty = woLines.reduce((s, l) => s + l.quantity, 0);
+                    const woPackedQty = woLines.reduce((s, l) => s + (packedByLine.get(l.id) ?? 0), 0);
+                    const woPackedLines = woLines.filter(
+                      (l) => getLineStatus(l, packedByLine.get(l.id) ?? 0) === "full",
+                    ).length;
+                    const woPct = woTotalQty ? Math.round((woPackedQty / woTotalQty) * 100) : 0;
+                    return (
+                      <Fragment key={wo}>
+                        {/* WO group header */}
+                        <tr className="bg-secondary/50 border-b border-border">
+                          <td colSpan={9} className="py-2 px-4">
+                            <div className="flex items-center gap-4">
+                              <span className="font-mono text-sm font-bold text-foreground">{wo}</span>
+                              <span className="text-xs text-muted-foreground tabular-nums">
+                                {woPackedLines}/{woLines.length} שורות
+                              </span>
+                              <span className="text-xs text-muted-foreground tabular-nums">
+                                {woPackedQty.toLocaleString()}/{woTotalQty.toLocaleString()} יח׳
+                              </span>
+                              <div className="flex items-center gap-2 flex-1 max-w-48">
+                                <div className="flex-1 h-1.5 bg-secondary rounded-full overflow-hidden">
+                                  <div
+                                    className={`h-full rounded-full ${woPct === 100 ? "bg-green-500" : "bg-brand-accent"}`}
+                                    style={{ width: `${woPct}%` }}
+                                  />
+                                </div>
+                                <span className="text-xs font-semibold tabular-nums text-muted-foreground">{woPct}%</span>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                        {/* Lines in this WO (sorted by status within group) */}
+                        {[...woLines]
+                          .sort((a, b) => {
+                            const o: Record<string, number> = { none: 0, partial: 1, full: 2 };
+                            return (
+                              o[getLineStatus(a, packedByLine.get(a.id) ?? 0)] -
+                              o[getLineStatus(b, packedByLine.get(b.id) ?? 0)]
+                            );
+                          })
+                          .map(renderLine)}
+                      </Fragment>
+                    );
+                  })
+                ) : (
+                  // Flat view
+                  sortedLines.map(renderLine)
                 )}
               </tbody>
             </table>
-
-            {/* Row count footer */}
-            {filteredLines.length > 0 && (
-              <div className="px-4 py-2 border-t border-border/60 bg-card text-[11px] text-muted-foreground flex items-center justify-between">
-                <span className="tabular-nums">
-                  {hasFilter
-                    ? `${filteredLines.length.toLocaleString()} שורות מתוך ${lines.length.toLocaleString()}`
-                    : `${lines.length.toLocaleString()} שורות סה"כ`}
-                </span>
-                {hasFilter && (
-                  <button onClick={clearSearch} className="text-brand-accent hover:underline text-[11px]">
-                    נקה סינון
-                  </button>
-                )}
-              </div>
-            )}
           </div>
         </section>
 
@@ -337,24 +495,33 @@ function PackingWorkspace() {
             </div>
             <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
               {cartons.map((c) => {
-                const items = allocations.filter((a) => a.cartonId === c.id);
                 const qty = getCartonTotalQty(allocations, c.id);
-                const skuCount = new Set(items.map((a) => a.lineId)).size;
+                const skuCount = new Set(allocations.filter((a) => a.cartonId === c.id).map((a) => a.lineId)).size;
                 const missingWeight = !c.weight;
                 const missingDims = !(c.length && c.width && c.height);
+                const isActive = c.id === activeCartonId;
                 return (
                   <div
                     key={c.id}
-                    className={`bg-card rounded-lg ring-1 p-3 flex flex-col gap-2 ${
-                      c.status === "closed" ? "opacity-70 ring-black/5" : "ring-black/5 hover:ring-black/10"
-                    } transition-shadow`}
+                    onClick={() => c.status !== "closed" && setActiveCartonId(c.id === activeCartonId ? null : c.id)}
+                    className={`bg-card rounded-lg ring-1 p-3 flex flex-col gap-2 cursor-pointer transition-all ${
+                      isActive
+                        ? "ring-brand-accent ring-2"
+                        : c.status === "closed"
+                          ? "opacity-70 ring-black/5 cursor-default"
+                          : "ring-black/5 hover:ring-black/10"
+                    }`}
                   >
                     <div className="flex justify-between items-start">
                       <div className="flex flex-col">
-                        <span className="text-[10px] font-bold text-muted-foreground tracking-wider">{c.number}</span>
+                        <div className="flex items-center gap-1.5">
+                          {isActive && <Zap className="size-3 text-brand-accent" />}
+                          <span className="text-[10px] font-bold text-muted-foreground tracking-wider">{c.number}</span>
+                        </div>
                         <Link
                           to="/cartons/$cartonId"
                           params={{ cartonId: c.id }}
+                          onClick={(e) => e.stopPropagation()}
                           className="text-xs font-semibold text-brand-accent hover:underline flex items-center gap-1"
                         >
                           פרטים <ExternalLink className="size-3" />
@@ -385,14 +552,20 @@ function PackingWorkspace() {
                     <div className="flex gap-1.5">
                       {c.status !== "closed" ? (
                         <button
-                          onClick={() => { if (confirm(`לסגור את ${c.number}?`)) setCartonStatus(c.id, "closed"); }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (confirm(`לסגור את ${c.number}?`)) setCartonStatus(c.id, "closed");
+                          }}
                           className="flex-1 text-[11px] bg-brand text-primary-foreground py-1 rounded font-medium hover:bg-zinc-800"
                         >
                           סגור
                         </button>
                       ) : (
                         <button
-                          onClick={() => setCartonStatus(c.id, "packing")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setCartonStatus(c.id, "packing");
+                          }}
                           className="flex-1 text-[11px] bg-secondary text-foreground py-1 rounded font-medium hover:bg-zinc-200"
                         >
                           פתח
@@ -400,7 +573,10 @@ function PackingWorkspace() {
                       )}
                       {qty === 0 && (
                         <button
-                          onClick={() => { if (confirm(`למחוק את ${c.number}?`)) deleteCarton(c.id); }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (confirm(`למחוק את ${c.number}?`)) deleteCarton(c.id);
+                          }}
                           className="size-6 grid place-items-center bg-secondary hover:bg-red-50 hover:text-destructive rounded transition-colors"
                         >
                           <X className="size-3" />
@@ -441,6 +617,10 @@ function PackingWorkspace() {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PackModal (unchanged logic, autoFocus quantity input added)
+// ─────────────────────────────────────────────────────────────────────────────
+
 function nextDraftId() { return `D${Math.random().toString(36).slice(2, 8)}`; }
 
 function PackModal({
@@ -467,12 +647,8 @@ function PackModal({
   ]);
 
   const nextSuggested = useMemo(() => {
-    const nums = cartons.map((c) => {
-      const m = c.number.match(/(\d+)/);
-      return m ? Number(m[1]) : 0;
-    });
-    const max = Math.max(0, ...nums);
-    return `CARTON-${String(max + 1).padStart(3, "0")}`;
+    const nums = cartons.map((c) => { const m = c.number.match(/(\d+)/); return m ? Number(m[1]) : 0; });
+    return `CARTON-${String(Math.max(0, ...nums) + 1).padStart(3, "0")}`;
   }, [cartons]);
 
   const allocatedTotal = drafts.reduce((s, d) => s + (Number(d.quantity) || 0), 0);
@@ -488,26 +664,19 @@ function PackModal({
   function removeRow(id: string) {
     setDrafts((ds) => (ds.length === 1 ? ds : ds.filter((d) => d.id !== id)));
   }
-
   function confirmPack() {
     const rows = mode === "single" ? drafts.slice(0, 1) : drafts;
     for (const d of rows) {
       if (d.quantity <= 0) continue;
       let cartonId = d.cartonId;
-      if (cartonId === "__new__") {
-        const c = onCreateCarton(d.newNumber?.trim() || undefined);
-        cartonId = c.id;
-      }
+      if (cartonId === "__new__") { const c = onCreateCarton(d.newNumber?.trim() || undefined); cartonId = c.id; }
       onAllocate(cartonId, d.quantity);
     }
     onClose();
   }
-
   function switchMode(m: "single" | "split") {
     setMode(m);
-    if (m === "single") {
-      setDrafts((ds) => [{ ...(ds[0] ?? { id: nextDraftId(), cartonId: openCartons[0]?.id ?? "__new__", quantity: remaining }), quantity: remaining }]);
-    }
+    if (m === "single") setDrafts((ds) => [{ ...(ds[0] ?? { id: nextDraftId(), cartonId: openCartons[0]?.id ?? "__new__", quantity: remaining }), quantity: remaining }]);
   }
 
   return (
@@ -531,37 +700,25 @@ function PackModal({
 
         <div className="px-5 pt-4">
           <div className="inline-flex bg-secondary rounded-md p-0.5">
-            <button onClick={() => switchMode("single")} className={`px-3 py-1.5 text-xs font-medium rounded ${mode === "single" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"}`}>
-              קרטון יחיד
-            </button>
-            <button onClick={() => switchMode("split")} className={`px-3 py-1.5 text-xs font-medium rounded ${mode === "split" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"}`}>
-              פיצול בין קרטונים
-            </button>
+            <button onClick={() => switchMode("single")} className={`px-3 py-1.5 text-xs font-medium rounded ${mode === "single" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"}`}>קרטון יחיד</button>
+            <button onClick={() => switchMode("split")} className={`px-3 py-1.5 text-xs font-medium rounded ${mode === "split" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"}`}>פיצול בין קרטונים</button>
           </div>
         </div>
 
         <div className="px-5 pt-3 pb-2 overflow-y-auto flex flex-col gap-2">
           {(mode === "single" ? drafts.slice(0, 1) : drafts).map((d, idx) => (
             <DraftRow
-              key={d.id}
-              index={idx}
-              draft={d}
-              cartons={openCartons}
-              nextSuggested={nextSuggested}
-              onChange={(p) => updateDraft(d.id, p)}
+              key={d.id} index={idx} draft={d} cartons={openCartons}
+              nextSuggested={nextSuggested} onChange={(p) => updateDraft(d.id, p)}
               onRemove={mode === "split" && drafts.length > 1 ? () => removeRow(d.id) : undefined}
-              maxQty={remaining}
+              maxQty={remaining} autoFocus={idx === 0}
             />
           ))}
-
           {mode === "split" && (
-            <div className="flex gap-2 pt-1">
-              <button onClick={addRow} className="flex-1 text-xs py-2 border border-dashed border-border rounded-md hover:border-brand-accent hover:text-brand-accent text-muted-foreground transition-colors">
-                + הוסף הקצאה לקרטון
-              </button>
-            </div>
+            <button onClick={addRow} className="text-xs py-2 border border-dashed border-border rounded-md hover:border-brand-accent hover:text-brand-accent text-muted-foreground transition-colors">
+              + הוסף הקצאה לקרטון
+            </button>
           )}
-
           {existingAllocs.length > 0 && (
             <div className="mt-3 pt-3 border-t border-border">
               <div className="text-[11px] uppercase tracking-wider font-bold text-muted-foreground mb-2">הקצאות קיימות לשורה זו</div>
@@ -571,10 +728,8 @@ function PackModal({
                   return (
                     <div key={a.id} className="flex items-center gap-2 bg-surface-muted rounded-md px-3 py-2 text-sm">
                       <span className="font-mono text-xs text-brand-accent flex-1">{c?.number ?? "—"}</span>
-                      <input type="number" min={1} value={a.quantity}
-                        onChange={(e) => onUpdateAlloc(a.id, Math.max(0, Number(e.target.value)))}
-                        className="w-20 bg-card ring-1 ring-border rounded px-2 py-1 text-sm tabular-nums text-center outline-none focus:ring-brand-accent"
-                      />
+                      <input type="number" min={1} value={a.quantity} onChange={(e) => onUpdateAlloc(a.id, Math.max(0, Number(e.target.value)))}
+                        className="w-20 bg-card ring-1 ring-border rounded px-2 py-1 text-sm tabular-nums text-center outline-none focus:ring-brand-accent" />
                       <select value={a.cartonId} onChange={(e) => onMoveAlloc(a.id, e.target.value)}
                         className="bg-card ring-1 ring-border rounded px-2 py-1 text-xs outline-none focus:ring-brand-accent">
                         {openCartons.map((cc) => <option key={cc.id} value={cc.id}>העבר → {cc.number}</option>)}
@@ -622,15 +777,10 @@ function Stat({ label, value, mono, highlight }: { label: string; value: string;
 }
 
 function DraftRow({
-  index, draft, cartons, nextSuggested, onChange, onRemove, maxQty,
+  index, draft, cartons, nextSuggested, onChange, onRemove, maxQty, autoFocus,
 }: {
-  index: number;
-  draft: Draft;
-  cartons: Carton[];
-  nextSuggested: string;
-  onChange: (patch: Partial<Draft>) => void;
-  onRemove?: () => void;
-  maxQty: number;
+  index: number; draft: Draft; cartons: Carton[]; nextSuggested: string;
+  onChange: (patch: Partial<Draft>) => void; onRemove?: () => void; maxQty: number; autoFocus?: boolean;
 }) {
   const isNew = draft.cartonId === "__new__";
   return (
@@ -641,13 +791,15 @@ function DraftRow({
           <label className="block text-[10px] uppercase tracking-wider text-muted-foreground font-bold mb-1">קרטון</label>
           <select value={draft.cartonId} onChange={(e) => onChange({ cartonId: e.target.value })}
             className="w-full bg-card ring-1 ring-border rounded px-2 py-1.5 text-sm outline-none focus:ring-brand-accent">
-            {cartons.map((c) => <option key={c.id} value={c.id}>{c.number} {c.status === "packing" ? "· באריזה" : ""}</option>)}
+            {cartons.map((c) => <option key={c.id} value={c.id}>{c.number}{c.status === "packing" ? " · באריזה" : ""}</option>)}
             <option value="__new__">+ צור קרטון חדש</option>
           </select>
         </div>
         <div className="w-32">
           <label className="block text-[10px] uppercase tracking-wider text-muted-foreground font-bold mb-1">כמות</label>
-          <input type="number" min={1} max={maxQty} value={draft.quantity}
+          <input
+            type="number" min={1} max={maxQty} value={draft.quantity}
+            autoFocus={autoFocus}
             onChange={(e) => onChange({ quantity: Math.max(0, Number(e.target.value)) })}
             className="w-full bg-card ring-1 ring-border rounded px-2 py-1.5 text-sm font-semibold tabular-nums text-center outline-none focus:ring-brand-accent"
           />
@@ -662,8 +814,7 @@ function DraftRow({
         <div className="flex items-center gap-2 pr-8">
           <MoveRight className="size-3.5 text-muted-foreground" />
           <label className="text-[11px] text-muted-foreground">מס׳ קרטון:</label>
-          <input type="text" value={draft.newNumber ?? nextSuggested}
-            onChange={(e) => onChange({ newNumber: e.target.value })}
+          <input type="text" value={draft.newNumber ?? nextSuggested} onChange={(e) => onChange({ newNumber: e.target.value })}
             className="flex-1 bg-card ring-1 ring-border rounded px-2 py-1 text-xs font-mono outline-none focus:ring-brand-accent" />
           <span className="text-[10px] text-muted-foreground">משקל וממדים יוזנו מאוחר יותר</span>
         </div>
