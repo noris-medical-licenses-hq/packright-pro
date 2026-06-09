@@ -140,7 +140,7 @@ export const useStore = create<State>()(
         })),
       resetDemo: () => set({ ...seed(), currentUser: "אבי כהן" }),
     }),
-    { name: "packing-center-v2" },
+    { name: "packing-center-v3" },
   ),
 );
 
