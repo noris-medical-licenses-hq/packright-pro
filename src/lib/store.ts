@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import type { Allocation, AuditEntry, Carton, CartonStatus, ImportEntry, LineStatus, ShipmentLine } from "./types";
+import type { ActiveFile, Allocation, AuditEntry, Carton, CartonStatus, ImportEntry, LineStatus, ShipmentLine } from "./types";
 import { generateDemoAllocations, generateDemoAudit, generateDemoCartons, generateDemoImports, generateDemoLines } from "./demo-data";
 
 interface State {
@@ -10,8 +10,10 @@ interface State {
   imports: ImportEntry[];
   audit: AuditEntry[];
   currentUser: string;
+  activeFile: ActiveFile | null;
 
   addLines: (lines: ShipmentLine[], importEntry: ImportEntry) => void;
+  replaceSession: (lines: ShipmentLine[], fileName: string) => void;
   createCarton: (number?: string) => Carton;
   updateCarton: (id: string, patch: Partial<Carton>) => void;
   deleteCarton: (id: string) => void;
@@ -29,7 +31,13 @@ function seed() {
   const allocations = generateDemoAllocations(lines, cartons);
   const imports = generateDemoImports();
   const audit = generateDemoAudit();
-  return { lines, cartons, allocations, imports, audit };
+  const activeFile: ActiveFile = {
+    name: "shipment_export_2026-06-09.xlsx",
+    loadedAt: new Date(Date.UTC(2026, 5, 9, 4, 0, 0)).toISOString(),
+    lineCount: lines.length,
+    totalQty: lines.reduce((s, l) => s + l.quantity, 0),
+  };
+  return { lines, cartons, allocations, imports, audit, activeFile };
 }
 
 function log(state: State, action: string, details: string): AuditEntry[] {
@@ -49,6 +57,19 @@ export const useStore = create<State>()(
           lines: [...s.lines, ...newLines],
           imports: [importEntry, ...s.imports],
           audit: log(s, "ייבוא קובץ", importEntry.fileName),
+        })),
+      replaceSession: (newLines, fileName) =>
+        set((s) => ({
+          lines: newLines,
+          cartons: [],
+          allocations: [],
+          activeFile: {
+            name: fileName,
+            loadedAt: new Date().toISOString(),
+            lineCount: newLines.length,
+            totalQty: newLines.reduce((sum, l) => sum + l.quantity, 0),
+          },
+          audit: log(s, "החלפת קובץ פעיל", `${fileName} (${newLines.length} שורות)`),
         })),
       createCarton: (manualNumber) => {
         const state = get();
@@ -119,7 +140,7 @@ export const useStore = create<State>()(
         })),
       resetDemo: () => set({ ...seed(), currentUser: "אבי כהן" }),
     }),
-    { name: "packing-center-v2" },
+    { name: "packing-center-v3" },
   ),
 );
 

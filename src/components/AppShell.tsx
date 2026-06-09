@@ -1,19 +1,18 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { LayoutDashboard, Upload, PackageOpen, ScrollText, FileText } from "lucide-react";
+import { PackageOpen, FileText, FileSpreadsheet, Replace } from "lucide-react";
 import type { ReactNode } from "react";
 import { useStore } from "@/lib/store";
 
 const nav = [
-  { to: "/", label: "מסוף", icon: LayoutDashboard },
-  { to: "/import", label: "ייבוא", icon: Upload },
   { to: "/packing", label: "אריזה", icon: PackageOpen },
   { to: "/delivery-note", label: "ת. משלוח", icon: FileText },
-  { to: "/audit", label: "יומן", icon: ScrollText },
+  { to: "/import", label: "החלפת קובץ", icon: Replace },
 ] as const;
 
 export function AppShell({ children, title, headerRight }: { children: ReactNode; title: string; headerRight?: ReactNode }) {
   const path = useRouterState({ select: (s) => s.location.pathname });
   const user = useStore((s) => s.currentUser);
+  const activeFile = useStore((s) => s.activeFile);
   return (
     <div className="flex h-screen w-full bg-background text-foreground" dir="rtl">
       <nav className="w-20 flex flex-col items-center py-5 bg-secondary border-l border-border gap-7 shrink-0">
@@ -23,7 +22,7 @@ export function AppShell({ children, title, headerRight }: { children: ReactNode
         <div className="flex flex-col gap-5">
           {nav.map((item) => {
             const Icon = item.icon;
-            const active = item.to === "/" ? path === "/" : path.startsWith(item.to);
+            const active = path.startsWith(item.to);
             return (
               <Link
                 key={item.to}
@@ -43,11 +42,25 @@ export function AppShell({ children, title, headerRight }: { children: ReactNode
         </div>
       </nav>
       <main className="flex-1 flex flex-col min-w-0">
-        <header className="h-14 border-b border-border bg-card flex items-center justify-between px-6 shrink-0">
-          <div className="flex items-center gap-4">
+        <header className="h-14 border-b border-border bg-card flex items-center justify-between px-6 shrink-0 gap-4">
+          <div className="flex items-center gap-4 min-w-0">
             <h1 className="text-lg font-semibold tracking-tight">{title}</h1>
           </div>
-          <div className="flex items-center gap-3">{headerRight}</div>
+          <div className="flex items-center gap-3 min-w-0">
+            {activeFile && (
+              <div className="flex items-center gap-2 bg-cyan-50/60 ring-1 ring-cyan-200/60 rounded-lg px-3 py-1.5 min-w-0">
+                <FileSpreadsheet className="size-4 text-cyan-700 shrink-0" />
+                <div className="flex flex-col leading-tight min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[9px] uppercase tracking-wider font-bold text-cyan-700">קובץ פעיל</span>
+                    <span className="text-[9px] tabular-nums text-cyan-700/70">{activeFile.lineCount} שורות · {activeFile.totalQty.toLocaleString()} יח׳</span>
+                  </div>
+                  <span className="text-xs font-semibold text-foreground truncate max-w-[28ch]" title={activeFile.name}>{activeFile.name}</span>
+                </div>
+              </div>
+            )}
+            {headerRight}
+          </div>
         </header>
         <div className="flex-1 overflow-hidden flex flex-col min-h-0">{children}</div>
       </main>

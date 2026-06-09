@@ -53,6 +53,13 @@ export interface ImportEntry {
   status: "success" | "failed";
 }
 
+export interface ActiveFile {
+  name: string;
+  loadedAt: string;
+  lineCount: number;
+  totalQty: number;
+}
+
 export interface AuditEntry {
   id: string;
   timestamp: string;
