@@ -80,11 +80,15 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "מרכז בקרת אריזה — Packing Control Center" },
       { name: "description", content: "מערכת ניהול אריזה מקצועית לפעולות משלוח Priority ERP" },
-      { property: "og:title", content: "Packing Control Center" },
-      { property: "og:description", content: "Warehouse packing management for Priority ERP" },
+      { property: "og:title", content: "מרכז בקרת אריזה — Packing Control Center" },
+      { property: "og:description", content: "מערכת ניהול אריזה מקצועית לפעולות משלוח Priority ERP" },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
       { name: "twitter:site", content: "@Lovable" },
+      { name: "twitter:title", content: "מרכז בקרת אריזה — Packing Control Center" },
+      { name: "twitter:description", content: "מערכת ניהול אריזה מקצועית לפעולות משלוח Priority ERP" },
+      { property: "og:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/521936e2-6385-40e8-a06d-9a1206a16699/id-preview-f00bff8c--cd71a4a7-6b24-43b4-bb90-98911118967c.lovable.app-1781002321148.png" },
+      { name: "twitter:image", content: "https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/521936e2-6385-40e8-a06d-9a1206a16699/id-preview-f00bff8c--cd71a4a7-6b24-43b4-bb90-98911118967c.lovable.app-1781002321148.png" },
     ],
     links: [
       {
