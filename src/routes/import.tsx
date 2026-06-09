@@ -50,6 +50,18 @@ type Diff = {
   modified: { before: ShipmentLine; after: ShipmentLine; changes: ("sku" | "workOrder" | "batch")[] }[];
 };
 
+type WoDiffResult = {
+  added: string[];
+  removed: string[];
+  changed: string[];
+};
+
+type SkuDiffResult = {
+  added: { sku: string; description: string; totalQty: number }[];
+  removed: { sku: string; description: string; totalQty: number }[];
+  qtyChanged: { sku: string; description: string; oldQty: number; newQty: number }[];
+};
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 function keyOf(l: ShipmentLine) {
@@ -99,6 +111,65 @@ function computeDiff(oldLines: ShipmentLine[], newLines: ShipmentLine[]): Diff {
   }
   const finalAdded = added.filter((a) => !matchedAddedKeys.has(keyOf(a)));
   return { added: finalAdded, removed: stillRemoved, qtyChanged, modified };
+}
+
+function computeWoDiff(oldLines: ShipmentLine[], newLines: ShipmentLine[], diff: Diff): WoDiffResult {
+  const oldWOs = new Set(oldLines.map((l) => l.workOrder));
+  const newWOs = new Set(newLines.map((l) => l.workOrder));
+
+  const added = [...newWOs].filter((wo) => !oldWOs.has(wo)).sort((a, b) => a.localeCompare(b, "he"));
+  const removed = [...oldWOs].filter((wo) => !newWOs.has(wo)).sort((a, b) => a.localeCompare(b, "he"));
+
+  // WOs present in both sets but with at least one line-level diff
+  const changedSet = new Set<string>();
+  for (const l of diff.added) changedSet.add(l.workOrder);
+  for (const l of diff.removed) changedSet.add(l.workOrder);
+  for (const x of diff.qtyChanged) { changedSet.add(x.before.workOrder); changedSet.add(x.after.workOrder); }
+  for (const x of diff.modified) { changedSet.add(x.before.workOrder); changedSet.add(x.after.workOrder); }
+
+  const addedSet = new Set(added);
+  const removedSet = new Set(removed);
+  const changed = [...changedSet]
+    .filter((wo) => !addedSet.has(wo) && !removedSet.has(wo))
+    .sort((a, b) => a.localeCompare(b, "he"));
+
+  return { added, removed, changed };
+}
+
+function computeSkuDiff(oldLines: ShipmentLine[], newLines: ShipmentLine[]): SkuDiffResult {
+  const oldMap = new Map<string, { totalQty: number; description: string }>();
+  for (const l of oldLines) {
+    const e = oldMap.get(l.sku);
+    if (!e) oldMap.set(l.sku, { totalQty: l.quantity, description: l.description });
+    else e.totalQty += l.quantity;
+  }
+
+  const newMap = new Map<string, { totalQty: number; description: string }>();
+  for (const l of newLines) {
+    const e = newMap.get(l.sku);
+    if (!e) newMap.set(l.sku, { totalQty: l.quantity, description: l.description });
+    else e.totalQty += l.quantity;
+  }
+
+  const added: SkuDiffResult["added"] = [];
+  const removed: SkuDiffResult["removed"] = [];
+  const qtyChanged: SkuDiffResult["qtyChanged"] = [];
+
+  for (const [sku, data] of newMap) {
+    const old = oldMap.get(sku);
+    if (!old) added.push({ sku, description: data.description, totalQty: data.totalQty });
+    else if (old.totalQty !== data.totalQty)
+      qtyChanged.push({ sku, description: data.description, oldQty: old.totalQty, newQty: data.totalQty });
+  }
+  for (const [sku, data] of oldMap) {
+    if (!newMap.has(sku)) removed.push({ sku, description: data.description, totalQty: data.totalQty });
+  }
+
+  added.sort((a, b) => a.sku.localeCompare(b.sku));
+  removed.sort((a, b) => a.sku.localeCompare(b.sku));
+  qtyChanged.sort((a, b) => a.sku.localeCompare(b.sku));
+
+  return { added, removed, qtyChanged };
 }
 
 // Human-readable labels for all mappable fields (used in MappingStep preview table)
@@ -156,6 +227,14 @@ function ReplaceSessionPage() {
   const diff = useMemo(() => (pendingLines ? computeDiff(lines, pendingLines) : null), [lines, pendingLines]);
   const packedCount = useMemo(() => new Set(allocations.map((a) => a.lineId)).size, [allocations]);
   const sessionImpact = useMemo(() => previewSessionImpact(allocations, cartons), [allocations, cartons]);
+  const woDiff = useMemo(
+    () => (diff && lines.length > 0 && pendingLines ? computeWoDiff(lines, pendingLines, diff) : null),
+    [lines, pendingLines, diff],
+  );
+  const skuDiff = useMemo(
+    () => (lines.length > 0 && pendingLines ? computeSkuDiff(lines, pendingLines) : null),
+    [lines, pendingLines],
+  );
 
   async function pickFile(file: File) {
     setPendingName(file.name);
@@ -311,6 +390,8 @@ function ReplaceSessionPage() {
             importErrors={pendingErrors}
             diff={diff!}
             impact={sessionImpact}
+            woDiff={woDiff}
+            skuDiff={skuDiff}
             cancelLabel={reviewFromMapping ? "חזור למיפוי" : "ביטול"}
             onCancel={reviewFromMapping ? () => setStep("mapping") : reset}
             onProceed={() => setStep("confirm")}
@@ -323,6 +404,7 @@ function ReplaceSessionPage() {
             pendingName={pendingName}
             diff={diff}
             impact={sessionImpact}
+            woDiff={woDiff}
             ack={ack}
             setAck={setAck}
             onCancel={() => setStep("review")}
@@ -415,6 +497,8 @@ function ReviewView({
   importErrors,
   diff,
   impact,
+  woDiff,
+  skuDiff,
   cancelLabel,
   onCancel,
   onProceed,
@@ -425,6 +509,8 @@ function ReviewView({
   importErrors: ImportError[];
   diff: Diff;
   impact: SessionImpact;
+  woDiff: WoDiffResult | null;
+  skuDiff: SkuDiffResult | null;
   cancelLabel: string;
   onCancel: () => void;
   onProceed: () => void;
@@ -514,6 +600,10 @@ function ReviewView({
           <SummaryCard icon={ArrowLeftRight} label='שינויי מק"ט/פק"ע/אצווה' value={diff.modified.length} tone="mod" />
         </div>
       )}
+
+      {/* ── WO & SKU comparison panels ── */}
+      {oldCount > 0 && woDiff && <WoComparisonPanel woDiff={woDiff} />}
+      {oldCount > 0 && skuDiff && <SkuComparisonPanel skuDiff={skuDiff} />}
 
       {/* ── validation errors ── */}
       {importErrors.length > 0 && (
@@ -674,6 +764,171 @@ function SummaryCard({
         <span className="text-[11px] font-semibold uppercase tracking-wider">{label}</span>
       </div>
       <div className="text-2xl font-bold tabular-nums mt-1">{value.toLocaleString()}</div>
+    </div>
+  );
+}
+
+// ─── WoComparisonPanel ─────────────────────────────────────────────────────────
+
+function WoComparisonPanel({ woDiff }: { woDiff: WoDiffResult }) {
+  const total = woDiff.added.length + woDiff.removed.length + woDiff.changed.length;
+  if (total === 0) return null;
+
+  return (
+    <div className="bg-card rounded-xl ring-1 ring-black/5 overflow-hidden">
+      <div className="px-5 py-3 border-b border-border flex items-center gap-3">
+        <h3 className="text-sm font-semibold">השוואת פקודות עבודה</h3>
+        <span className="text-xs text-muted-foreground tabular-nums">{total} שינויים</span>
+        <div className="flex gap-2 mr-auto">
+          {woDiff.added.length > 0 && (
+            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 ring-1 ring-green-200/60">
+              +{woDiff.added.length} חדשות
+            </span>
+          )}
+          {woDiff.removed.length > 0 && (
+            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-700 ring-1 ring-red-200/60">
+              −{woDiff.removed.length} שהוסרו
+            </span>
+          )}
+          {woDiff.changed.length > 0 && (
+            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200/60">
+              {woDiff.changed.length} עם שינויים
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="p-4 flex flex-col gap-3">
+        {woDiff.added.length > 0 && (
+          <div className="flex items-start gap-3">
+            <span className="shrink-0 text-[11px] font-semibold text-green-700 bg-green-50 ring-1 ring-green-200/60 rounded px-2 py-0.5 mt-0.5">
+              חדשות
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {woDiff.added.slice(0, 20).map((wo) => (
+                <span key={wo} className="text-xs font-mono px-2 py-0.5 bg-green-50 text-green-800 ring-1 ring-green-200/50 rounded">
+                  {wo}
+                </span>
+              ))}
+              {woDiff.added.length > 20 && (
+                <span className="text-xs text-muted-foreground self-center">+{woDiff.added.length - 20} נוספות</span>
+              )}
+            </div>
+          </div>
+        )}
+        {woDiff.removed.length > 0 && (
+          <div className="flex items-start gap-3">
+            <span className="shrink-0 text-[11px] font-semibold text-red-700 bg-red-50 ring-1 ring-red-200/60 rounded px-2 py-0.5 mt-0.5">
+              שהוסרו
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {woDiff.removed.slice(0, 20).map((wo) => (
+                <span key={wo} className="text-xs font-mono px-2 py-0.5 bg-red-50 text-red-800 ring-1 ring-red-200/50 rounded">
+                  {wo}
+                </span>
+              ))}
+              {woDiff.removed.length > 20 && (
+                <span className="text-xs text-muted-foreground self-center">+{woDiff.removed.length - 20} נוספות</span>
+              )}
+            </div>
+          </div>
+        )}
+        {woDiff.changed.length > 0 && (
+          <div className="flex items-start gap-3">
+            <span className="shrink-0 text-[11px] font-semibold text-amber-700 bg-amber-50 ring-1 ring-amber-200/60 rounded px-2 py-0.5 mt-0.5">
+              שינויים
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {woDiff.changed.slice(0, 20).map((wo) => (
+                <span key={wo} className="text-xs font-mono px-2 py-0.5 bg-amber-50 text-amber-800 ring-1 ring-amber-200/50 rounded">
+                  {wo}
+                </span>
+              ))}
+              {woDiff.changed.length > 20 && (
+                <span className="text-xs text-muted-foreground self-center">+{woDiff.changed.length - 20} נוספות</span>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── SkuComparisonPanel ─────────────────────────────────────────────────────────
+
+function SkuComparisonPanel({ skuDiff }: { skuDiff: SkuDiffResult }) {
+  const total = skuDiff.added.length + skuDiff.removed.length + skuDiff.qtyChanged.length;
+  if (total === 0) return null;
+
+  return (
+    <div className="bg-card rounded-xl ring-1 ring-black/5 overflow-hidden">
+      <div className="px-5 py-3 border-b border-border flex items-center gap-3">
+        <h3 className="text-sm font-semibold">השוואת מק"טים</h3>
+        <span className="text-xs text-muted-foreground tabular-nums">{total} שינויים</span>
+        <div className="flex gap-2 mr-auto">
+          {skuDiff.added.length > 0 && (
+            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-green-50 text-green-700 ring-1 ring-green-200/60">
+              +{skuDiff.added.length} חדשים
+            </span>
+          )}
+          {skuDiff.removed.length > 0 && (
+            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-red-50 text-red-700 ring-1 ring-red-200/60">
+              −{skuDiff.removed.length} שהוסרו
+            </span>
+          )}
+          {skuDiff.qtyChanged.length > 0 && (
+            <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 ring-1 ring-amber-200/60">
+              {skuDiff.qtyChanged.length} שינויי כמות
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="overflow-auto max-h-72">
+        <table className="w-full text-right text-sm">
+          <thead className="sticky top-0 bg-card">
+            <tr className="text-[11px] text-muted-foreground border-b border-border">
+              <th className="py-2 px-3 font-medium w-6" />
+              <th className="py-2 px-3 font-medium">מק"ט</th>
+              <th className="py-2 px-3 font-medium">תיאור</th>
+              <th className="py-2 px-3 font-medium text-center whitespace-nowrap">כמות כוללת</th>
+            </tr>
+          </thead>
+          <tbody>
+            {skuDiff.added.map((s) => (
+              <tr key={`add-${s.sku}`} className="border-b border-border/50 bg-green-50/40">
+                <td className="py-1.5 px-3">
+                  <span className="block w-1.5 h-4 rounded-full bg-green-500 mx-auto" />
+                </td>
+                <td className="py-1.5 px-3 font-mono text-xs text-green-800 font-semibold">{s.sku}</td>
+                <td className="py-1.5 px-3"><DescCell text={s.description} /></td>
+                <td className="py-1.5 px-3 text-center tabular-nums text-green-800 font-semibold">{s.totalQty.toLocaleString()}</td>
+              </tr>
+            ))}
+            {skuDiff.removed.map((s) => (
+              <tr key={`rem-${s.sku}`} className="border-b border-border/50 bg-red-50/40">
+                <td className="py-1.5 px-3">
+                  <span className="block w-1.5 h-4 rounded-full bg-red-400 mx-auto" />
+                </td>
+                <td className="py-1.5 px-3 font-mono text-xs text-red-800 font-semibold">{s.sku}</td>
+                <td className="py-1.5 px-3"><DescCell text={s.description} /></td>
+                <td className="py-1.5 px-3 text-center tabular-nums text-red-800 font-semibold">{s.totalQty.toLocaleString()}</td>
+              </tr>
+            ))}
+            {skuDiff.qtyChanged.map((s) => (
+              <tr key={`qty-${s.sku}`} className="border-b border-border/50 bg-amber-50/30">
+                <td className="py-1.5 px-3">
+                  <span className="block w-1.5 h-4 rounded-full bg-amber-500 mx-auto" />
+                </td>
+                <td className="py-1.5 px-3 font-mono text-xs text-amber-900 font-semibold">{s.sku}</td>
+                <td className="py-1.5 px-3"><DescCell text={s.description} /></td>
+                <td className="py-1.5 px-3 text-center tabular-nums text-amber-900 font-semibold whitespace-nowrap">
+                  {s.oldQty.toLocaleString()} → {s.newQty.toLocaleString()}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -1145,6 +1400,7 @@ function ConfirmDialog({
   pendingName,
   diff,
   impact,
+  woDiff,
   ack,
   setAck,
   onCancel,
@@ -1153,6 +1409,7 @@ function ConfirmDialog({
   pendingName: string;
   diff: Diff;
   impact: SessionImpact;
+  woDiff: WoDiffResult | null;
   ack: boolean;
   setAck: (v: boolean) => void;
   onCancel: () => void;
@@ -1208,6 +1465,42 @@ function ConfirmDialog({
           </div>
         )}
 
+        {woDiff && (woDiff.added.length > 0 || woDiff.removed.length > 0 || woDiff.changed.length > 0) && (
+          <div className="bg-amber-50 ring-1 ring-amber-200/60 rounded-lg px-3 py-2.5 flex flex-col gap-1">
+            <div className="text-[11px] font-semibold uppercase tracking-wide text-amber-800">שינויי פקודות עבודה</div>
+            <div className="flex gap-4 text-xs">
+              {woDiff.added.length > 0 && (
+                <span className="text-green-700 font-semibold">+{woDiff.added.length} חדשות</span>
+              )}
+              {woDiff.removed.length > 0 && (
+                <span className="text-red-700 font-semibold">−{woDiff.removed.length} שהוסרו</span>
+              )}
+              {woDiff.changed.length > 0 && (
+                <span className="text-amber-700 font-semibold">{woDiff.changed.length} עם שינויים</span>
+              )}
+            </div>
+            {woDiff.added.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-0.5">
+                {woDiff.added.slice(0, 6).map((wo) => (
+                  <span key={wo} className="text-[10px] font-mono px-1.5 py-0.5 bg-green-100 text-green-800 ring-1 ring-green-200/60 rounded">{wo}</span>
+                ))}
+                {woDiff.added.length > 6 && (
+                  <span className="text-[10px] text-green-700">+{woDiff.added.length - 6} נוספות</span>
+                )}
+              </div>
+            )}
+            {woDiff.removed.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-0.5">
+                {woDiff.removed.slice(0, 6).map((wo) => (
+                  <span key={wo} className="text-[10px] font-mono px-1.5 py-0.5 bg-red-100 text-red-800 ring-1 ring-red-200/60 rounded">{wo}</span>
+                ))}
+                {woDiff.removed.length > 6 && (
+                  <span className="text-[10px] text-red-700">+{woDiff.removed.length - 6} נוספות</span>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         <ul className="text-xs text-foreground/80 space-y-1.5 list-disc pr-5">
           <li>יתווספו <span className="font-semibold text-green-700 tabular-nums">{diff.added.length}</span> שורות חדשות.</li>
           <li>יוסרו <span className="font-semibold text-red-700 tabular-nums">{diff.removed.length}</span> שורות.</li>
