@@ -10,9 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as PackingRouteImport } from './routes/packing'
-import { Route as ImportRouteImport } from './routes/import'
 import { Route as DeliveryNoteRouteImport } from './routes/delivery-note'
-import { Route as AuditRouteImport } from './routes/audit'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as CartonsCartonIdRouteImport } from './routes/cartons.$cartonId'
 
@@ -21,19 +19,9 @@ const PackingRoute = PackingRouteImport.update({
   path: '/packing',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ImportRoute = ImportRouteImport.update({
-  id: '/import',
-  path: '/import',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const DeliveryNoteRoute = DeliveryNoteRouteImport.update({
   id: '/delivery-note',
   path: '/delivery-note',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AuditRoute = AuditRouteImport.update({
-  id: '/audit',
-  path: '/audit',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -49,61 +37,34 @@ const CartonsCartonIdRoute = CartonsCartonIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/audit': typeof AuditRoute
   '/delivery-note': typeof DeliveryNoteRoute
-  '/import': typeof ImportRoute
   '/packing': typeof PackingRoute
   '/cartons/$cartonId': typeof CartonsCartonIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/audit': typeof AuditRoute
   '/delivery-note': typeof DeliveryNoteRoute
-  '/import': typeof ImportRoute
   '/packing': typeof PackingRoute
   '/cartons/$cartonId': typeof CartonsCartonIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/audit': typeof AuditRoute
   '/delivery-note': typeof DeliveryNoteRoute
-  '/import': typeof ImportRoute
   '/packing': typeof PackingRoute
   '/cartons/$cartonId': typeof CartonsCartonIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths:
-    | '/'
-    | '/audit'
-    | '/delivery-note'
-    | '/import'
-    | '/packing'
-    | '/cartons/$cartonId'
+  fullPaths: '/' | '/delivery-note' | '/packing' | '/cartons/$cartonId'
   fileRoutesByTo: FileRoutesByTo
-  to:
-    | '/'
-    | '/audit'
-    | '/delivery-note'
-    | '/import'
-    | '/packing'
-    | '/cartons/$cartonId'
-  id:
-    | '__root__'
-    | '/'
-    | '/audit'
-    | '/delivery-note'
-    | '/import'
-    | '/packing'
-    | '/cartons/$cartonId'
+  to: '/' | '/delivery-note' | '/packing' | '/cartons/$cartonId'
+  id: '__root__' | '/' | '/delivery-note' | '/packing' | '/cartons/$cartonId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  AuditRoute: typeof AuditRoute
   DeliveryNoteRoute: typeof DeliveryNoteRoute
-  ImportRoute: typeof ImportRoute
   PackingRoute: typeof PackingRoute
   CartonsCartonIdRoute: typeof CartonsCartonIdRoute
 }
@@ -117,25 +78,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PackingRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/import': {
-      id: '/import'
-      path: '/import'
-      fullPath: '/import'
-      preLoaderRoute: typeof ImportRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/delivery-note': {
       id: '/delivery-note'
       path: '/delivery-note'
       fullPath: '/delivery-note'
       preLoaderRoute: typeof DeliveryNoteRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/audit': {
-      id: '/audit'
-      path: '/audit'
-      fullPath: '/audit'
-      preLoaderRoute: typeof AuditRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -157,12 +104,20 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AuditRoute: AuditRoute,
   DeliveryNoteRoute: DeliveryNoteRoute,
-  ImportRoute: ImportRoute,
   PackingRoute: PackingRoute,
   CartonsCartonIdRoute: CartonsCartonIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
+
+import type { getRouter } from './router.tsx'
+import type { startInstance } from './start.ts'
+declare module '@tanstack/react-start' {
+  interface Register {
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
+  }
+}
