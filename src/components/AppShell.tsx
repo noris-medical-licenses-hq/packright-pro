@@ -51,11 +51,16 @@ export function AppShell({ children, title, headerRight }: { children: ReactNode
               <div className="flex items-center gap-2 bg-cyan-50/60 ring-1 ring-cyan-200/60 rounded-lg px-3 py-1.5 min-w-0">
                 <FileSpreadsheet className="size-4 text-cyan-700 shrink-0" />
                 <div className="flex flex-col leading-tight min-w-0">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="text-[9px] uppercase tracking-wider font-bold text-cyan-700">קובץ פעיל</span>
-                    <span className="text-[9px] tabular-nums text-cyan-700/70">{activeFile.lineCount} שורות · {activeFile.totalQty.toLocaleString()} יח׳</span>
+                    <span className="text-[9px] tabular-nums text-cyan-700/70">
+                      {activeFile.lineCount} שורות · {activeFile.totalQty.toLocaleString()} יח׳
+                    </span>
+                    <span className="text-[9px] tabular-nums text-cyan-700/50">
+                      · יובא {new Date(activeFile.loadedAt).toLocaleString("he-IL", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                    </span>
                   </div>
-                  <span className="text-xs font-semibold text-foreground truncate max-w-[28ch]" title={activeFile.name}>{activeFile.name}</span>
+                  <span className="text-xs font-semibold text-foreground truncate max-w-[32ch]" title={activeFile.name}>{activeFile.name}</span>
                 </div>
               </div>
             )}

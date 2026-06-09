@@ -18,6 +18,7 @@ export interface ShipmentLine {
   totalAmount: number;
   destinationCountry: string;
   date: string;
+  packingStatus?: string;
 }
 
 export interface Allocation {
