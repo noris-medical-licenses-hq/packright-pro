@@ -71,16 +71,30 @@ export function generateDemoCartons(): Carton[] {
     { id: "K1", number: "CARTON-001", status: "packing", weight: 12.45, length: 40, width: 40, height: 30, createdAt: new Date(now - 3600e3).toISOString() },
     { id: "K2", number: "CARTON-002", status: "closed", weight: 8.1, length: 30, width: 30, height: 25, createdAt: new Date(now - 7200e3).toISOString(), closedAt: new Date(now - 3000e3).toISOString() },
     { id: "K3", number: "CARTON-003", status: "open", createdAt: new Date(now - 1800e3).toISOString() },
+    { id: "K4", number: "CARTON-004", status: "packing", length: 50, width: 40, height: 35, createdAt: new Date(now - 2400e3).toISOString() },
+    { id: "K5", number: "CARTON-005", status: "packing", weight: 5.6, createdAt: new Date(now - 1200e3).toISOString() },
   ];
 }
 
 export function generateDemoAllocations(lines: ShipmentLine[], cartons: Carton[]): Allocation[] {
   const allocs: Allocation[] = [];
   let i = 1;
-  // Allocate first line partially to carton 1
-  if (lines[0]) allocs.push({ id: `A${i++}`, lineId: lines[0].id, cartonId: cartons[0].id, quantity: Math.floor(lines[0].quantity * 0.4), createdAt: new Date().toISOString() });
-  if (lines[1]) allocs.push({ id: `A${i++}`, lineId: lines[1].id, cartonId: cartons[1].id, quantity: lines[1].quantity, createdAt: new Date().toISOString() });
-  if (lines[2]) allocs.push({ id: `A${i++}`, lineId: lines[2].id, cartonId: cartons[0].id, quantity: lines[2].quantity, createdAt: new Date().toISOString() });
+  const ts = new Date(Date.UTC(2026, 5, 9, 4, 0, 0)).toISOString();
+  // Example: split SKU across 3 cartons (partial)
+  if (lines[0]) {
+    const q = lines[0].quantity;
+    allocs.push({ id: `A${i++}`, lineId: lines[0].id, cartonId: cartons[0].id, quantity: Math.floor(q * 0.4), createdAt: ts });
+    allocs.push({ id: `A${i++}`, lineId: lines[0].id, cartonId: cartons[3].id, quantity: Math.floor(q * 0.3), createdAt: ts });
+  }
+  // Example: fully packed in one carton
+  if (lines[1]) allocs.push({ id: `A${i++}`, lineId: lines[1].id, cartonId: cartons[1].id, quantity: lines[1].quantity, createdAt: ts });
+  // Example: SKU split across 2 cartons fully
+  if (lines[2]) {
+    const q = lines[2].quantity;
+    const half = Math.floor(q / 2);
+    allocs.push({ id: `A${i++}`, lineId: lines[2].id, cartonId: cartons[0].id, quantity: half, createdAt: ts });
+    allocs.push({ id: `A${i++}`, lineId: lines[2].id, cartonId: cartons[4].id, quantity: q - half, createdAt: ts });
+  }
   return allocs;
 }
 
