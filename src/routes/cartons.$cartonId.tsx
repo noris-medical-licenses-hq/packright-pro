@@ -130,7 +130,21 @@ function CartonDetail() {
                   </td>
                 </tr>
               ))}
-              {!items.length && <tr><td colSpan={6} className="py-10 text-center text-sm text-muted-foreground">הקרטון ריק. גרור שורות מהשולחן.</td></tr>}
+              {!items.length && (
+                <tr>
+                  <td colSpan={6} className="py-10 text-center">
+                    <div className="flex flex-col items-center gap-2">
+                      <div className="text-sm text-muted-foreground">הקרטון ריק</div>
+                      <div className="text-xs text-muted-foreground/70">
+                        בחר קרטון זה כ"קרטון יעד" בשולחן האריזה ולחץ "אריזה" על השורות הרצויות
+                      </div>
+                      <Link to="/packing" className="text-xs text-brand-accent hover:underline mt-1">
+                        ← עבור לשולחן האריזה
+                      </Link>
+                    </div>
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
