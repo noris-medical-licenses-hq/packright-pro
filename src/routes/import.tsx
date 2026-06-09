@@ -40,6 +40,7 @@ export const Route = createFileRoute("/import")({
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
+// "mapping" is an exception-only step — normal Priority exports never reach it
 type Step = "select" | "analyzing" | "mapping" | "review" | "confirm";
 
 type Diff = {
@@ -100,7 +101,7 @@ function computeDiff(oldLines: ShipmentLine[], newLines: ShipmentLine[]): Diff {
   return { added: finalAdded, removed: stillRemoved, qtyChanged, modified };
 }
 
-// Human-readable labels for all mappable fields (used in preview table headers)
+// Human-readable labels for all mappable fields (used in MappingStep preview table)
 const FIELD_LABEL: Record<MappableField, string> = {
   sku: 'מק"ט',
   description: "תיאור",
@@ -121,7 +122,6 @@ const FIELD_LABEL: Record<MappableField, string> = {
 
 // ─── shared utility component ─────────────────────────────────────────────────
 
-/** Renders a description string clamped to 2 lines; shows full text on hover. */
 function DescCell({ text }: { text: string }) {
   if (!text) return <span className="text-muted-foreground/50 italic text-xs">—</span>;
   return (
@@ -150,6 +150,7 @@ function ReplaceSessionPage() {
   const [pendingName, setPendingName] = useState<string | null>(null);
   const [pendingLines, setPendingLines] = useState<ShipmentLine[] | null>(null);
   const [pendingErrors, setPendingErrors] = useState<ImportError[]>([]);
+  const [reviewFromMapping, setReviewFromMapping] = useState(false);
   const [ack, setAck] = useState(false);
 
   const diff = useMemo(() => (pendingLines ? computeDiff(lines, pendingLines) : null), [lines, pendingLines]);
@@ -162,9 +163,23 @@ function ReplaceSessionPage() {
     setStep("analyzing");
     try {
       const result = await parseExcelFile(file);
+      const detectedMap = autoDetectColumns(result.headers);
       setParseResult(result);
-      setColumnMap(autoDetectColumns(result.headers));
-      setStep("mapping");
+      setColumnMap(detectedMap);
+
+      const status = getMappingStatus(detectedMap);
+      if (status.isComplete) {
+        // Happy path: all required fields detected — skip mapping UI entirely
+        const mapped = applyColumnMap(result.rows, detectedMap);
+        const { valid, errors } = validateRows(mapped);
+        setPendingLines(valid);
+        setPendingErrors(errors);
+        setReviewFromMapping(false);
+        setStep("review");
+      } else {
+        // Exception: required columns missing or ambiguous — show mapping screen
+        setStep("mapping");
+      }
     } catch (err) {
       setParseError(err instanceof Error ? err.message : "שגיאה בניתוח הקובץ");
       setStep("select");
@@ -174,6 +189,7 @@ function ReplaceSessionPage() {
   function handleMappingContinue(validLines: ShipmentLine[], errors: ImportError[]) {
     setPendingLines(validLines);
     setPendingErrors(errors);
+    setReviewFromMapping(true);
     setStep("review");
   }
 
@@ -185,6 +201,7 @@ function ReplaceSessionPage() {
     setParseResult(null);
     setParseError(null);
     setColumnMap({});
+    setReviewFromMapping(false);
     setAck(false);
   }
 
@@ -274,7 +291,7 @@ function ReplaceSessionPage() {
           </section>
         )}
 
-        {/* ── step: mapping ── */}
+        {/* ── step: mapping (exception only) ── */}
         {step === "mapping" && parseResult && (
           <MappingStep
             parseResult={parseResult}
@@ -286,15 +303,17 @@ function ReplaceSessionPage() {
         )}
 
         {/* ── step: review ── */}
-        {step === "review" && diff && pendingLines && pendingName && (
+        {step === "review" && parseResult && pendingLines !== null && pendingName && (
           <ReviewView
+            parseResult={parseResult}
             pendingName={pendingName}
+            pendingLines={pendingLines}
             oldCount={lines.length}
-            newCount={pendingLines.length}
-            impact={sessionImpact}
             importErrors={pendingErrors}
-            diff={diff}
-            onCancel={() => setStep("mapping")}
+            diff={diff!}
+            impact={sessionImpact}
+            cancelLabel={reviewFromMapping ? "חזור למיפוי" : "ביטול"}
+            onCancel={reviewFromMapping ? () => setStep("mapping") : reset}
             onProceed={() => setStep("confirm")}
           />
         )}
@@ -320,12 +339,40 @@ function ReplaceSessionPage() {
 // ─── StepIndicator ─────────────────────────────────────────────────────────────
 
 function StepIndicator({ step }: { step: Step }) {
-  const steps: { id: Step; label: string }[] = [
+  // Exception path — mapping required
+  if (step === "mapping") {
+    return (
+      <div className="flex items-center gap-2 flex-wrap">
+        {(["1 · בחירת קובץ", "2 · ניתוח"] as const).map((label) => (
+          <div key={label} className="flex items-center gap-2">
+            <div className="px-3 py-1.5 rounded-md text-xs font-medium ring-1 bg-cyan-50 text-cyan-700 ring-cyan-200/60">
+              {label}
+            </div>
+            <div className="w-4 h-px bg-border" />
+          </div>
+        ))}
+        <div className="px-3 py-1.5 rounded-md text-xs font-medium ring-1 bg-amber-50 text-amber-700 ring-amber-300/60 flex items-center gap-1.5">
+          <AlertTriangle className="size-3" />
+          מיפוי ידני נדרש
+        </div>
+        {(["3 · תצוגה מקדימה", "4 · אישור"] as const).map((label) => (
+          <div key={label} className="flex items-center gap-2">
+            <div className="w-4 h-px bg-border" />
+            <div className="px-3 py-1.5 rounded-md text-xs font-medium ring-1 bg-secondary text-muted-foreground ring-transparent">
+              {label}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  // Normal 4-step path
+  const steps: { id: Exclude<Step, "mapping">; label: string }[] = [
     { id: "select", label: "1 · בחירת קובץ" },
     { id: "analyzing", label: "2 · ניתוח" },
-    { id: "mapping", label: "3 · מיפוי עמודות" },
-    { id: "review", label: "4 · השוואה" },
-    { id: "confirm", label: "5 · אישור והחלפה" },
+    { id: "review", label: "3 · תצוגה מקדימה" },
+    { id: "confirm", label: "4 · אישור" },
   ];
   const idx = steps.findIndex((s) => s.id === step);
   return (
@@ -350,64 +397,61 @@ function StepIndicator({ step }: { step: Step }) {
   );
 }
 
-// ─── MappingStep ───────────────────────────────────────────────────────────────
+// ─── ReviewView ────────────────────────────────────────────────────────────────
 
-const PREVIEW_FIELD_ORDER: MappableField[] = [
-  "sku", "description", "workOrder", "batch", "quantity", "unit",
-  "deliveryNumber", "customerName", "customerNumber",
-  "currency", "destinationCountry", "date",
+const REVIEW_PREVIEW_COLS: { key: keyof ShipmentLine; label: string; numeric?: boolean }[] = [
+  { key: "sku", label: 'מק"ט' },
+  { key: "description", label: "תיאור" },
+  { key: "workOrder", label: 'פק"ע' },
+  { key: "batch", label: "אצווה" },
+  { key: "quantity", label: "כמות", numeric: true },
+  { key: "unit", label: "יח'" },
+  { key: "deliveryNumber", label: "מסמך" },
 ];
 
-function MappingStep({
+function ReviewView({
   parseResult,
-  columnMap,
-  onColumnMapChange,
-  onContinue,
+  pendingLines,
+  oldCount,
+  importErrors,
+  diff,
+  impact,
+  cancelLabel,
   onCancel,
+  onProceed,
 }: {
   parseResult: ParseResult;
-  columnMap: ColumnMap;
-  onColumnMapChange: (m: ColumnMap) => void;
-  onContinue: (lines: ShipmentLine[], errors: ImportError[]) => void;
+  pendingName: string;
+  pendingLines: ShipmentLine[];
+  oldCount: number;
+  importErrors: ImportError[];
+  diff: Diff;
+  impact: SessionImpact;
+  cancelLabel: string;
   onCancel: () => void;
+  onProceed: () => void;
 }) {
-  const mappedRows = useMemo(
-    () => applyColumnMap(parseResult.rows, columnMap),
-    [parseResult.rows, columnMap],
-  );
-
-  const validation = useMemo(() => validateRows(mappedRows), [mappedRows]);
-  const mappingStatus = getMappingStatus(columnMap);
-
-  // 0-based row indices that have validation errors (for preview highlighting)
-  const errorRowSet = useMemo(
-    () => new Set(validation.errors.map((e) => e.row - 2)),
-    [validation.errors],
-  );
-
   const summary = useMemo(() => {
-    const v = validation.valid;
+    const v = pendingLines;
     return {
       valid: v.length,
       invalid: parseResult.rowCount - v.length,
-      deliveries: new Set(v.map((l) => l.deliveryNumber).filter((x) => x !== "—")).size,
       workOrders: new Set(v.map((l) => l.workOrder)).size,
       batches: new Set(v.map((l) => l.batch)).size,
       skus: new Set(v.map((l) => l.sku)).size,
       totalQty: v.reduce((s, l) => s + l.quantity, 0),
     };
-  }, [validation.valid, parseResult.rowCount]);
+  }, [pendingLines, parseResult.rowCount]);
 
-  const previewCols = PREVIEW_FIELD_ORDER.filter((f) => !!columnMap[f]);
-  const previewRows = mappedRows.slice(0, 50);
+  const previewLines = pendingLines.slice(0, 50);
 
   return (
     <section className="flex flex-col gap-4">
 
-      {/* ── file metadata card ── */}
+      {/* ── file metadata ── */}
       <div className="bg-card rounded-xl ring-1 ring-black/5 p-5 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         <div className="sm:col-span-2">
-          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">שם קובץ</div>
+          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">קובץ חדש</div>
           <div className="text-sm font-semibold font-mono truncate" title={parseResult.fileName}>
             {parseResult.fileName}
           </div>
@@ -423,7 +467,7 @@ function MappingStep({
           </div>
         </div>
         <div>
-          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">שם גיליון</div>
+          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">גיליון</div>
           <div className="text-sm font-semibold font-mono truncate" title={parseResult.activeSheet}>
             {parseResult.activeSheet}
           </div>
@@ -436,331 +480,73 @@ function MappingStep({
         </div>
       </div>
 
-      {/* ── two-column: mapping table + summary ── */}
-      <div className="grid grid-cols-[1fr_260px] gap-4 items-start">
-
-        {/* Column mapping table */}
-        <div className="bg-card rounded-xl ring-1 ring-black/5 overflow-hidden">
-          <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-3">
-            <h3 className="text-sm font-semibold">מיפוי עמודות</h3>
-            <span
-              className={`text-xs font-medium px-2 py-0.5 rounded-full ring-1 shrink-0 ${
-                mappingStatus.isComplete
-                  ? "bg-green-50 text-green-700 ring-green-200/60"
-                  : "bg-amber-50 text-amber-700 ring-amber-200/60"
-              }`}
-            >
-              {mappingStatus.mappedRequired}/{mappingStatus.totalRequired} שדות חובה ממופים
-            </span>
-          </div>
-          <table className="w-full text-right text-sm">
-            <thead>
-              <tr className="text-[11px] text-muted-foreground border-b border-border bg-secondary/30">
-                <th className="py-2 px-4 font-medium text-right">שדה יעד</th>
-                <th className="py-2 px-4 font-medium text-right">עמודת מקור בקובץ</th>
-                <th className="py-2 px-3 font-medium text-center w-12"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {FIELD_DEFINITIONS.map((def) => {
-                const mapped = columnMap[def.field];
-                return (
-                  <tr key={def.field} className="border-b border-border/50 hover:bg-secondary/20">
-                    <td className="py-2 px-4">
-                      <span className="text-sm font-medium">{def.label}</span>
-                      {def.required && <span className="mr-1 text-[10px] text-red-500 font-bold">*</span>}
-                    </td>
-                    <td className="py-2 px-4">
-                      <select
-                        value={mapped ?? ""}
-                        onChange={(e) =>
-                          onColumnMapChange({
-                            ...columnMap,
-                            [def.field]: e.target.value || undefined,
-                          })
-                        }
-                        className="w-full text-sm border border-input rounded px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
-                        dir="ltr"
-                      >
-                        <option value="">— לא ממופה —</option>
-                        {parseResult.headers.map((h) => (
-                          <option key={h} value={h}>
-                            {h}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="py-2 px-3 text-center">
-                      {mapped ? (
-                        <CheckCheck className="size-4 text-green-600 mx-auto" />
-                      ) : def.required ? (
-                        <AlertCircle className="size-4 text-amber-500 mx-auto" />
-                      ) : (
-                        <div className="size-3 rounded-full border border-border mx-auto" />
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Right column: summary + detected columns */}
-        <div className="flex flex-col gap-3">
-
-          {/* Import summary */}
-          <div className="bg-card rounded-xl ring-1 ring-black/5 p-4">
-            <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-3">
-              סיכום ייבוא
-            </div>
-            <div className="flex flex-col gap-2">
-              <SummaryRow label="שורות תקינות" value={summary.valid} valueClass="text-green-700" />
-              {summary.invalid > 0 && (
-                <SummaryRow label="שורות עם שגיאות" value={summary.invalid} valueClass="text-red-600" />
-              )}
-              <div className="border-t border-border pt-2 flex flex-col gap-2">
-                {summary.deliveries > 0 && (
-                  <SummaryRow label="משלוחים" value={summary.deliveries} />
-                )}
-                <SummaryRow label="פקודות עבודה" value={summary.workOrders} />
-                <SummaryRow label="אצוות" value={summary.batches} />
-                <SummaryRow label='מק"טים ייחודיים' value={summary.skus} />
-                <div className="border-t border-border pt-2">
-                  <SummaryRow label='סה"כ כמות' value={summary.totalQty} valueClass="text-base font-bold" />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Detected columns list */}
-          <div className="bg-card rounded-xl ring-1 ring-black/5 p-4">
-            <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-2">
-              עמודות שזוהו בקובץ ({parseResult.headers.length})
-            </div>
-            <div className="flex flex-wrap gap-1">
-              {parseResult.headers.map((h) => (
-                <span
-                  key={h}
-                  className="text-[10px] font-mono px-1.5 py-0.5 bg-secondary rounded ring-1 ring-black/5 truncate max-w-[120px]"
-                  title={h}
-                >
-                  {h}
-                </span>
-              ))}
-            </div>
-          </div>
-
-          {/* Mapping status badge — prominent when incomplete */}
-          {!mappingStatus.isComplete && (
-            <div className="bg-amber-50 ring-1 ring-amber-200/60 rounded-lg px-4 py-3 flex items-start gap-2">
-              <AlertTriangle className="size-4 text-amber-600 mt-0.5 shrink-0" />
-              <p className="text-xs text-amber-800">
-                מפה את כל שדות החובה (*) כדי להמשיך.
-              </p>
-            </div>
+      {/* ── import summary ── */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className="bg-green-50 ring-1 ring-green-200/60 rounded-lg px-4 py-3 lg:col-span-2">
+          <div className="text-[11px] font-semibold uppercase tracking-wider text-green-700 mb-1">שורות לייבוא</div>
+          <div className="text-2xl font-bold tabular-nums text-green-700">{summary.valid.toLocaleString()}</div>
+          {summary.invalid > 0 && (
+            <div className="text-[11px] text-red-600 mt-0.5 tabular-nums">{summary.invalid} הושמטו</div>
           )}
+        </div>
+        <div className="bg-card ring-1 ring-black/5 rounded-lg px-4 py-3">
+          <div className="text-[11px] font-medium text-muted-foreground mb-1">פקודות עבודה</div>
+          <div className="text-xl font-bold tabular-nums">{summary.workOrders.toLocaleString()}</div>
+        </div>
+        <div className="bg-card ring-1 ring-black/5 rounded-lg px-4 py-3">
+          <div className="text-[11px] font-medium text-muted-foreground mb-1">אצוות</div>
+          <div className="text-xl font-bold tabular-nums">{summary.batches.toLocaleString()}</div>
+        </div>
+        <div className="bg-card ring-1 ring-black/5 rounded-lg px-4 py-3">
+          <div className="text-[11px] font-medium text-muted-foreground mb-1">מק"טים ייחודיים</div>
+          <div className="text-xl font-bold tabular-nums">{summary.skus.toLocaleString()}</div>
+        </div>
+        <div className="bg-card ring-1 ring-black/5 rounded-lg px-4 py-3">
+          <div className="text-[11px] font-medium text-muted-foreground mb-1">סה"כ כמות</div>
+          <div className="text-xl font-bold tabular-nums">{summary.totalQty.toLocaleString()}</div>
         </div>
       </div>
 
-      {/* ── validation warnings ── */}
-      {validation.errors.length > 0 && (
+      {/* ── diff counts (vs active session) ── */}
+      {oldCount > 0 && (
+        <div className="grid grid-cols-4 gap-3">
+          <SummaryCard icon={Plus} label="שורות חדשות" value={diff.added.length} tone="add" />
+          <SummaryCard icon={Minus} label="שורות שהוסרו" value={diff.removed.length} tone="remove" />
+          <SummaryCard icon={Pencil} label="שינויי כמות" value={diff.qtyChanged.length} tone="qty" />
+          <SummaryCard icon={ArrowLeftRight} label='שינויי מק"ט/פק"ע/אצווה' value={diff.modified.length} tone="mod" />
+        </div>
+      )}
+
+      {/* ── validation errors ── */}
+      {importErrors.length > 0 && (
         <div className="bg-amber-50 ring-1 ring-amber-200/60 rounded-xl overflow-hidden">
           <div className="px-5 py-3 border-b border-amber-200/60 flex items-center gap-2">
             <AlertTriangle className="size-4 text-amber-600 shrink-0" />
             <span className="text-sm font-semibold text-amber-800">
-              אזהרות ייבוא ({validation.errors.length})
+              שורות שהושמטו ({importErrors.length})
             </span>
             <span className="text-xs text-amber-700 mr-auto">
-              {validation.valid.length.toLocaleString()} שורות תקינות יייובאו; שורות עם שגיאות יושמטו
+              {summary.valid.toLocaleString()} שורות תקינות יייובאו
             </span>
           </div>
           <div className="max-h-44 overflow-auto divide-y divide-amber-100">
-            {validation.errors.slice(0, 25).map((e, i) => (
+            {importErrors.slice(0, 25).map((e, i) => (
               <div key={i} className="px-5 py-2 text-xs text-amber-800 flex items-start gap-3">
                 <span className="font-mono font-semibold text-amber-600 shrink-0 tabular-nums">שורה {e.row}</span>
                 <span className="font-semibold text-amber-700 shrink-0 min-w-[80px]">{e.field}</span>
                 <span>{e.message}</span>
               </div>
             ))}
-            {validation.errors.length > 25 && (
+            {importErrors.length > 25 && (
               <div className="px-5 py-2 text-xs text-amber-600 text-center">
-                +{validation.errors.length - 25} שגיאות נוספות לא מוצגות
+                +{importErrors.length - 25} שגיאות נוספות
               </div>
             )}
           </div>
         </div>
       )}
 
-      {/* ── 50-row preview table ── */}
-      <div className="bg-card rounded-xl ring-1 ring-black/5 overflow-hidden">
-        <div className="px-5 py-3 border-b border-border flex items-center justify-between">
-          <h3 className="text-sm font-semibold">תצוגה מקדימה</h3>
-          <span className="text-xs text-muted-foreground tabular-nums">
-            מציג {Math.min(50, parseResult.rowCount)} מתוך {parseResult.rowCount.toLocaleString()} שורות
-          </span>
-        </div>
-
-        {previewCols.length === 0 ? (
-          <div className="p-10 text-center text-sm text-muted-foreground">
-            מפה לפחות עמודה אחת כדי לראות תצוגה מקדימה
-          </div>
-        ) : (
-          <div className="overflow-auto max-h-96">
-            <table className="w-full text-right text-sm min-w-max">
-              <thead className="sticky top-0 bg-card z-10">
-                <tr className="text-[11px] text-muted-foreground border-b border-border">
-                  <th className="py-2 px-3 font-medium w-10 text-center">#</th>
-                  {previewCols.map((col) => (
-                    <th key={col} className="py-2 px-3 font-medium whitespace-nowrap">
-                      {FIELD_LABEL[col]}
-                      <span className="mr-1 text-[10px] font-normal text-muted-foreground/50 font-mono">
-                        {columnMap[col]}
-                      </span>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {previewRows.map((row, i) => {
-                  const hasError = errorRowSet.has(i);
-                  return (
-                    <tr
-                      key={i}
-                      className={`border-b border-border/50 ${
-                        hasError ? "bg-red-50" : i % 2 !== 0 ? "bg-secondary/20" : ""
-                      }`}
-                    >
-                      <td className="py-1.5 px-3 text-center text-[11px] text-muted-foreground tabular-nums">
-                        {i + 2}
-                      </td>
-                      {previewCols.map((col) => {
-                        const raw = row[col];
-                        const val = raw !== null && raw !== undefined ? String(raw) : "";
-
-                        if (col === "description") {
-                          return (
-                            <td key={col} className="py-1.5 px-3 align-top">
-                              <DescCell text={val} />
-                            </td>
-                          );
-                        }
-
-                        const isNum = col === "quantity" || col === "unitPrice" || col === "totalAmount";
-                        return (
-                          <td
-                            key={col}
-                            className={`py-1.5 px-3 text-xs whitespace-nowrap ${
-                              isNum ? "tabular-nums font-semibold" : "font-mono"
-                            } ${!val ? "text-muted-foreground/40" : ""}`}
-                          >
-                            {val || "—"}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-
-      {/* ── actions ── */}
-      <div className="flex justify-end gap-2 pt-2">
-        <button
-          onClick={onCancel}
-          className="px-4 py-2 bg-secondary text-foreground rounded-md text-sm font-medium hover:bg-zinc-200"
-        >
-          ביטול
-        </button>
-        <button
-          onClick={() => onContinue(validation.valid, validation.errors)}
-          disabled={!mappingStatus.isComplete || validation.valid.length === 0}
-          className="px-5 py-2 bg-brand text-primary-foreground rounded-md text-sm font-semibold hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
-        >
-          המשך להשוואה
-          <ArrowLeftRight className="size-4" />
-        </button>
-      </div>
-    </section>
-  );
-}
-
-// ─── SummaryRow (used inside MappingStep summary panel) ───────────────────────
-
-function SummaryRow({
-  label,
-  value,
-  valueClass = "text-sm font-semibold",
-}: {
-  label: string;
-  value: number;
-  valueClass?: string;
-}) {
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span className={`tabular-nums ${valueClass}`}>{value.toLocaleString()}</span>
-    </div>
-  );
-}
-
-// ─── ReviewView ────────────────────────────────────────────────────────────────
-
-function ReviewView({
-  pendingName,
-  oldCount,
-  newCount,
-  impact,
-  importErrors,
-  diff,
-  onCancel,
-  onProceed,
-}: {
-  pendingName: string;
-  oldCount: number;
-  newCount: number;
-  impact: SessionImpact;
-  importErrors: ImportError[];
-  diff: Diff;
-  onCancel: () => void;
-  onProceed: () => void;
-}) {
-  return (
-    <section className="flex flex-col gap-4">
-      <div className="bg-card rounded-xl ring-1 ring-black/5 p-5 flex items-center gap-4">
-        <ArrowLeftRight className="size-5 text-brand-accent shrink-0" />
-        <div className="flex-1 min-w-0">
-          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground">השוואת קבצים</div>
-          <div className="text-sm">
-            <span className="font-medium">קובץ חדש:</span>{" "}
-            <span className="font-mono">{pendingName}</span>
-            <span className="text-muted-foreground"> ({newCount} שורות) </span>
-            <span className="mx-2 text-muted-foreground">↔</span>
-            <span className="font-medium">קובץ פעיל</span>
-            <span className="text-muted-foreground"> ({oldCount} שורות)</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-4 gap-3">
-        <SummaryCard icon={Plus} label="שורות חדשות" value={diff.added.length} tone="add" />
-        <SummaryCard icon={Minus} label="שורות שהוסרו" value={diff.removed.length} tone="remove" />
-        <SummaryCard icon={Pencil} label="שינויי כמות" value={diff.qtyChanged.length} tone="qty" />
-        <SummaryCard icon={ArrowLeftRight} label='שינויי מק"ט/פק"ע/אצווה' value={diff.modified.length} tone="mod" />
-      </div>
-
-      {importErrors.length > 0 && (
-        <div className="bg-amber-50 ring-1 ring-amber-200/60 rounded-lg px-4 py-3 flex items-start gap-3">
-          <AlertTriangle className="size-4 text-amber-700 mt-0.5 shrink-0" />
-          <div className="text-xs text-amber-800">
-            <span className="font-semibold">{importErrors.length} שורות הושמטו</span> בשל שגיאות מיפוי/ולידציה ולא יכללו בייבוא.
-          </div>
-        </div>
-      )}
-
+      {/* ── session impact warning ── */}
       {impact.requiresConfirmation && (
         <div className="bg-amber-50 ring-1 ring-amber-200/60 rounded-lg px-4 py-3 flex items-start gap-3">
           <AlertTriangle className="size-4 text-amber-700 mt-0.5 shrink-0" />
@@ -775,23 +561,87 @@ function ReviewView({
         </div>
       )}
 
-      <DiffSection title="שורות חדשות (יתווספו)" tone="add" lines={diff.added.map((l) => ({ a: l }))} renderQty={(a) => a.quantity} />
-      <DiffSection title="שורות שהוסרו (יימחקו)" tone="remove" lines={diff.removed.map((l) => ({ a: l }))} renderQty={(a) => a.quantity} />
-      <DiffSection
-        title="שינויי כמות"
-        tone="qty"
-        lines={diff.qtyChanged.map((x) => ({ a: x.after, b: x.before }))}
-        renderQty={(a, b) => `${b!.quantity} → ${a.quantity}`}
-      />
-      <ModifiedSection items={diff.modified} />
+      {/* ── preview table ── */}
+      <div className="bg-card rounded-xl ring-1 ring-black/5 overflow-hidden">
+        <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+          <h3 className="text-sm font-semibold">תצוגה מקדימה</h3>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            מציג {previewLines.length.toLocaleString()} מתוך {summary.valid.toLocaleString()} שורות תקינות
+          </span>
+        </div>
+        <div className="overflow-auto max-h-96">
+          <table className="w-full text-right text-sm min-w-max">
+            <thead className="sticky top-0 bg-card z-10">
+              <tr className="text-[11px] text-muted-foreground border-b border-border">
+                <th className="py-2 px-3 font-medium w-10 text-center">#</th>
+                {REVIEW_PREVIEW_COLS.map((col) => (
+                  <th key={col.key} className="py-2 px-3 font-medium whitespace-nowrap">
+                    {col.label}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {previewLines.map((line, i) => (
+                <tr key={line.id} className={`border-b border-border/50 ${i % 2 !== 0 ? "bg-secondary/20" : ""}`}>
+                  <td className="py-1.5 px-3 text-center text-[11px] text-muted-foreground tabular-nums">
+                    {i + 1}
+                  </td>
+                  {REVIEW_PREVIEW_COLS.map((col) => {
+                    const val = line[col.key];
+                    const str = val !== null && val !== undefined ? String(val) : "";
+                    if (col.key === "description") {
+                      return (
+                        <td key={col.key} className="py-1.5 px-3 align-top">
+                          <DescCell text={str} />
+                        </td>
+                      );
+                    }
+                    return (
+                      <td
+                        key={col.key}
+                        className={`py-1.5 px-3 text-xs whitespace-nowrap ${
+                          col.numeric ? "tabular-nums font-semibold" : "font-mono"
+                        } ${!str ? "text-muted-foreground/40" : ""}`}
+                      >
+                        {str || "—"}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
 
+      {/* ── diff detail sections (only when replacing an existing session) ── */}
+      {oldCount > 0 && (
+        <>
+          <DiffSection title="שורות חדשות (יתווספו)" tone="add" lines={diff.added.map((l) => ({ a: l }))} renderQty={(a) => a.quantity} />
+          <DiffSection title="שורות שהוסרו (יימחקו)" tone="remove" lines={diff.removed.map((l) => ({ a: l }))} renderQty={(a) => a.quantity} />
+          <DiffSection
+            title="שינויי כמות"
+            tone="qty"
+            lines={diff.qtyChanged.map((x) => ({ a: x.after, b: x.before }))}
+            renderQty={(a, b) => `${b!.quantity} → ${a.quantity}`}
+          />
+          <ModifiedSection items={diff.modified} />
+        </>
+      )}
+
+      {/* ── actions ── */}
       <div className="flex justify-end gap-2 pt-2">
-        <button onClick={onCancel} className="px-4 py-2 bg-secondary text-foreground rounded-md text-sm font-medium hover:bg-zinc-200">
-          חזור למיפוי
+        <button
+          onClick={onCancel}
+          className="px-4 py-2 bg-secondary text-foreground rounded-md text-sm font-medium hover:bg-zinc-200"
+        >
+          {cancelLabel}
         </button>
         <button
           onClick={onProceed}
-          className="px-5 py-2 bg-brand text-primary-foreground rounded-md text-sm font-semibold hover:bg-zinc-800 inline-flex items-center gap-1.5"
+          disabled={summary.valid === 0}
+          className="px-5 py-2 bg-brand text-primary-foreground rounded-md text-sm font-semibold hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
         >
           המשך לאישור החלפה <Replace className="size-4" />
         </button>
@@ -930,6 +780,367 @@ function ModifiedSection({ items }: { items: Diff["modified"] }) {
   );
 }
 
+// ─── MappingStep (exception screen) ───────────────────────────────────────────
+
+const PREVIEW_FIELD_ORDER: MappableField[] = [
+  "sku", "description", "workOrder", "batch", "quantity", "unit",
+  "deliveryNumber", "customerName", "customerNumber",
+  "currency", "destinationCountry", "date",
+];
+
+function MappingStep({
+  parseResult,
+  columnMap,
+  onColumnMapChange,
+  onContinue,
+  onCancel,
+}: {
+  parseResult: ParseResult;
+  columnMap: ColumnMap;
+  onColumnMapChange: (m: ColumnMap) => void;
+  onContinue: (lines: ShipmentLine[], errors: ImportError[]) => void;
+  onCancel: () => void;
+}) {
+  const mappedRows = useMemo(
+    () => applyColumnMap(parseResult.rows, columnMap),
+    [parseResult.rows, columnMap],
+  );
+
+  const validation = useMemo(() => validateRows(mappedRows), [mappedRows]);
+  const mappingStatus = getMappingStatus(columnMap);
+
+  const errorRowSet = useMemo(
+    () => new Set(validation.errors.map((e) => e.row - 2)),
+    [validation.errors],
+  );
+
+  const summary = useMemo(() => {
+    const v = validation.valid;
+    return {
+      valid: v.length,
+      invalid: parseResult.rowCount - v.length,
+      deliveries: new Set(v.map((l) => l.deliveryNumber).filter((x) => x !== "—")).size,
+      workOrders: new Set(v.map((l) => l.workOrder)).size,
+      batches: new Set(v.map((l) => l.batch)).size,
+      skus: new Set(v.map((l) => l.sku)).size,
+      totalQty: v.reduce((s, l) => s + l.quantity, 0),
+    };
+  }, [validation.valid, parseResult.rowCount]);
+
+  const previewCols = PREVIEW_FIELD_ORDER.filter((f) => !!columnMap[f]);
+  const previewRows = mappedRows.slice(0, 50);
+
+  return (
+    <section className="flex flex-col gap-4">
+
+      {/* Exception banner */}
+      <div className="bg-amber-50 ring-1 ring-amber-300/60 rounded-xl p-4 flex items-start gap-3">
+        <AlertTriangle className="size-5 text-amber-600 shrink-0 mt-0.5" />
+        <div>
+          <div className="text-sm font-semibold text-amber-800">לא ניתן לזהות אוטומטית את כל שדות החובה</div>
+          <div className="text-xs text-amber-700 mt-1">
+            קובץ זה שונה מפורמט Priority הסטנדרטי. מפה ידנית את העמודות החסרות כדי להמשיך.
+          </div>
+        </div>
+      </div>
+
+      {/* ── file metadata card ── */}
+      <div className="bg-card rounded-xl ring-1 ring-black/5 p-5 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+        <div className="sm:col-span-2">
+          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">שם קובץ</div>
+          <div className="text-sm font-semibold font-mono truncate" title={parseResult.fileName}>
+            {parseResult.fileName}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">גודל</div>
+          <div className="text-sm font-semibold">{formatFileSize(parseResult.fileSize)}</div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">זמן העלאה</div>
+          <div className="text-sm font-semibold tabular-nums">
+            {new Date(parseResult.uploadedAt).toLocaleString("he-IL")}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">שם גיליון</div>
+          <div className="text-sm font-semibold font-mono truncate" title={parseResult.activeSheet}>
+            {parseResult.activeSheet}
+          </div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-1">שורות / עמודות</div>
+          <div className="text-sm font-semibold tabular-nums">
+            {parseResult.rowCount.toLocaleString()} / {parseResult.headers.length}
+          </div>
+        </div>
+      </div>
+
+      {/* ── two-column: mapping table + summary ── */}
+      <div className="grid grid-cols-[1fr_260px] gap-4 items-start">
+
+        {/* Column mapping table */}
+        <div className="bg-card rounded-xl ring-1 ring-black/5 overflow-hidden">
+          <div className="px-5 py-3 border-b border-border flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold">מיפוי עמודות</h3>
+            <span
+              className={`text-xs font-medium px-2 py-0.5 rounded-full ring-1 shrink-0 ${
+                mappingStatus.isComplete
+                  ? "bg-green-50 text-green-700 ring-green-200/60"
+                  : "bg-amber-50 text-amber-700 ring-amber-200/60"
+              }`}
+            >
+              {mappingStatus.mappedRequired}/{mappingStatus.totalRequired} שדות חובה ממופים
+            </span>
+          </div>
+          <table className="w-full text-right text-sm">
+            <thead>
+              <tr className="text-[11px] text-muted-foreground border-b border-border bg-secondary/30">
+                <th className="py-2 px-4 font-medium text-right">שדה יעד</th>
+                <th className="py-2 px-4 font-medium text-right">עמודת מקור בקובץ</th>
+                <th className="py-2 px-3 font-medium text-center w-12"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {FIELD_DEFINITIONS.map((def) => {
+                const mapped = columnMap[def.field];
+                return (
+                  <tr key={def.field} className="border-b border-border/50 hover:bg-secondary/20">
+                    <td className="py-2 px-4">
+                      <span className="text-sm font-medium">{def.label}</span>
+                      {def.required && <span className="mr-1 text-[10px] text-red-500 font-bold">*</span>}
+                    </td>
+                    <td className="py-2 px-4">
+                      <select
+                        value={mapped ?? ""}
+                        onChange={(e) =>
+                          onColumnMapChange({
+                            ...columnMap,
+                            [def.field]: e.target.value || undefined,
+                          })
+                        }
+                        className="w-full text-sm border border-input rounded px-2 py-1 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                        dir="ltr"
+                      >
+                        <option value="">— לא ממופה —</option>
+                        {parseResult.headers.map((h) => (
+                          <option key={h} value={h}>
+                            {h}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="py-2 px-3 text-center">
+                      {mapped ? (
+                        <CheckCheck className="size-4 text-green-600 mx-auto" />
+                      ) : def.required ? (
+                        <AlertCircle className="size-4 text-amber-500 mx-auto" />
+                      ) : (
+                        <div className="size-3 rounded-full border border-border mx-auto" />
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Right column: summary + detected columns */}
+        <div className="flex flex-col gap-3">
+
+          <div className="bg-card rounded-xl ring-1 ring-black/5 p-4">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-3">
+              סיכום ייבוא
+            </div>
+            <div className="flex flex-col gap-2">
+              <SummaryRow label="שורות תקינות" value={summary.valid} valueClass="text-green-700" />
+              {summary.invalid > 0 && (
+                <SummaryRow label="שורות עם שגיאות" value={summary.invalid} valueClass="text-red-600" />
+              )}
+              <div className="border-t border-border pt-2 flex flex-col gap-2">
+                {summary.deliveries > 0 && (
+                  <SummaryRow label="משלוחים" value={summary.deliveries} />
+                )}
+                <SummaryRow label="פקודות עבודה" value={summary.workOrders} />
+                <SummaryRow label="אצוות" value={summary.batches} />
+                <SummaryRow label='מק"טים ייחודיים' value={summary.skus} />
+                <div className="border-t border-border pt-2">
+                  <SummaryRow label='סה"כ כמות' value={summary.totalQty} valueClass="text-base font-bold" />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-card rounded-xl ring-1 ring-black/5 p-4">
+            <div className="text-[10px] uppercase tracking-wider font-bold text-muted-foreground mb-2">
+              עמודות שזוהו ({parseResult.headers.length})
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {parseResult.headers.map((h) => (
+                <span
+                  key={h}
+                  className="text-[10px] font-mono px-1.5 py-0.5 bg-secondary rounded ring-1 ring-black/5 truncate max-w-[120px]"
+                  title={h}
+                >
+                  {h}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          {!mappingStatus.isComplete && (
+            <div className="bg-amber-50 ring-1 ring-amber-200/60 rounded-lg px-4 py-3 flex items-start gap-2">
+              <AlertTriangle className="size-4 text-amber-600 mt-0.5 shrink-0" />
+              <p className="text-xs text-amber-800">
+                מפה את כל שדות החובה (*) כדי להמשיך.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── validation warnings ── */}
+      {validation.errors.length > 0 && (
+        <div className="bg-amber-50 ring-1 ring-amber-200/60 rounded-xl overflow-hidden">
+          <div className="px-5 py-3 border-b border-amber-200/60 flex items-center gap-2">
+            <AlertTriangle className="size-4 text-amber-600 shrink-0" />
+            <span className="text-sm font-semibold text-amber-800">
+              אזהרות ייבוא ({validation.errors.length})
+            </span>
+            <span className="text-xs text-amber-700 mr-auto">
+              {validation.valid.length.toLocaleString()} שורות תקינות יייובאו
+            </span>
+          </div>
+          <div className="max-h-44 overflow-auto divide-y divide-amber-100">
+            {validation.errors.slice(0, 25).map((e, i) => (
+              <div key={i} className="px-5 py-2 text-xs text-amber-800 flex items-start gap-3">
+                <span className="font-mono font-semibold text-amber-600 shrink-0 tabular-nums">שורה {e.row}</span>
+                <span className="font-semibold text-amber-700 shrink-0 min-w-[80px]">{e.field}</span>
+                <span>{e.message}</span>
+              </div>
+            ))}
+            {validation.errors.length > 25 && (
+              <div className="px-5 py-2 text-xs text-amber-600 text-center">
+                +{validation.errors.length - 25} שגיאות נוספות לא מוצגות
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── 50-row preview ── */}
+      <div className="bg-card rounded-xl ring-1 ring-black/5 overflow-hidden">
+        <div className="px-5 py-3 border-b border-border flex items-center justify-between">
+          <h3 className="text-sm font-semibold">תצוגה מקדימה</h3>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            מציג {Math.min(50, parseResult.rowCount)} מתוך {parseResult.rowCount.toLocaleString()} שורות
+          </span>
+        </div>
+        {previewCols.length === 0 ? (
+          <div className="p-10 text-center text-sm text-muted-foreground">
+            מפה לפחות עמודה אחת כדי לראות תצוגה מקדימה
+          </div>
+        ) : (
+          <div className="overflow-auto max-h-96">
+            <table className="w-full text-right text-sm min-w-max">
+              <thead className="sticky top-0 bg-card z-10">
+                <tr className="text-[11px] text-muted-foreground border-b border-border">
+                  <th className="py-2 px-3 font-medium w-10 text-center">#</th>
+                  {previewCols.map((col) => (
+                    <th key={col} className="py-2 px-3 font-medium whitespace-nowrap">
+                      {FIELD_LABEL[col]}
+                      <span className="mr-1 text-[10px] font-normal text-muted-foreground/50 font-mono">
+                        {columnMap[col]}
+                      </span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {previewRows.map((row, i) => {
+                  const hasError = errorRowSet.has(i);
+                  return (
+                    <tr
+                      key={i}
+                      className={`border-b border-border/50 ${
+                        hasError ? "bg-red-50" : i % 2 !== 0 ? "bg-secondary/20" : ""
+                      }`}
+                    >
+                      <td className="py-1.5 px-3 text-center text-[11px] text-muted-foreground tabular-nums">
+                        {i + 2}
+                      </td>
+                      {previewCols.map((col) => {
+                        const raw = row[col];
+                        const val = raw !== null && raw !== undefined ? String(raw) : "";
+                        if (col === "description") {
+                          return (
+                            <td key={col} className="py-1.5 px-3 align-top">
+                              <DescCell text={val} />
+                            </td>
+                          );
+                        }
+                        const isNum = col === "quantity" || col === "unitPrice" || col === "totalAmount";
+                        return (
+                          <td
+                            key={col}
+                            className={`py-1.5 px-3 text-xs whitespace-nowrap ${
+                              isNum ? "tabular-nums font-semibold" : "font-mono"
+                            } ${!val ? "text-muted-foreground/40" : ""}`}
+                          >
+                            {val || "—"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ── actions ── */}
+      <div className="flex justify-end gap-2 pt-2">
+        <button
+          onClick={onCancel}
+          className="px-4 py-2 bg-secondary text-foreground rounded-md text-sm font-medium hover:bg-zinc-200"
+        >
+          ביטול
+        </button>
+        <button
+          onClick={() => onContinue(validation.valid, validation.errors)}
+          disabled={!mappingStatus.isComplete || validation.valid.length === 0}
+          className="px-5 py-2 bg-brand text-primary-foreground rounded-md text-sm font-semibold hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center gap-1.5"
+        >
+          המשך לתצוגה מקדימה
+          <ArrowLeftRight className="size-4" />
+        </button>
+      </div>
+    </section>
+  );
+}
+
+// ─── SummaryRow ───────────────────────────────────────────────────────────────
+
+function SummaryRow({
+  label,
+  value,
+  valueClass = "text-sm font-semibold",
+}: {
+  label: string;
+  value: number;
+  valueClass?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className={`tabular-nums ${valueClass}`}>{value.toLocaleString()}</span>
+    </div>
+  );
+}
+
 // ─── ConfirmDialog ─────────────────────────────────────────────────────────────
 
 function ConfirmDialog({
@@ -971,12 +1182,11 @@ function ConfirmDialog({
           </button>
         </div>
 
-        <div className="bg-surface-muted rounded-lg p-3 text-sm">
+        <div className="bg-secondary rounded-lg p-3 text-sm">
           <div className="text-xs text-muted-foreground">קובץ חדש</div>
           <div className="font-mono font-semibold truncate">{pendingName}</div>
         </div>
 
-        {/* Session impact — shown only when there is work in progress */}
         {impact.requiresConfirmation && (
           <div className="bg-red-50 ring-1 ring-red-200/60 rounded-lg p-3 flex flex-col gap-2">
             <div className="text-xs font-semibold text-red-700 flex items-center gap-1.5">
